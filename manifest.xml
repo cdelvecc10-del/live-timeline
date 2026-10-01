@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Live Timeline add-in manifest (add-in only manifest, PowerPoint).
+  Before installing: replace every "https://YOUR-HOST/live-timeline" below with the HTTPS address where you host this folder,
+  e.g. https://yourname.github.io/live-timeline  (no trailing slash).
+-->
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="TaskPaneApp">
+  <Id>15ab1065-931d-4bc6-aa6e-be41e8b100ed</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>CJD Life Sciences Consulting</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Live Timeline"/>
+  <Description DefaultValue="Rules-driven clinical development timelines: change a date or assumption and the timeline on the slide redraws."/>
+  <IconUrl DefaultValue="https://YOUR-HOST/live-timeline/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://YOUR-HOST/live-timeline/assets/icon-64.png"/>
+  <SupportUrl DefaultValue="https://YOUR-HOST/live-timeline/taskpane.html"/>
+  <Hosts>
+    <Host Name="Presentation"/>
+  </Hosts>
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="PowerPointApi" MinVersion="1.4"/>
+    </Sets>
+  </Requirements>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://YOUR-HOST/live-timeline/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Presentation">
+        <DesktopFormFactor>
+          <GetStarted>
+            <Title resid="GetStarted.Title"/>
+            <Description resid="GetStarted.Description"/>
+            <LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
+          </GetStarted>
+          <FunctionFile resid="Commands.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="LiveTimeline.Group">
+                <Label resid="Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16x16"/>
+                  <bt:Image size="32" resid="Icon.32x32"/>
+                  <bt:Image size="80" resid="Icon.80x80"/>
+                </Icon>
+                <Control xsi:type="Button" id="LiveTimeline.Open">
+                  <Label resid="Button.Label"/>
+                  <Supertip>
+                    <Title resid="Button.Label"/>
+                    <Description resid="Button.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16x16"/>
+                    <bt:Image size="32" resid="Icon.32x32"/>
+                    <bt:Image size="80" resid="Icon.80x80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>LiveTimelinePane</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16x16" DefaultValue="https://YOUR-HOST/live-timeline/assets/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://YOUR-HOST/live-timeline/assets/icon-32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://YOUR-HOST/live-timeline/assets/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://YOUR-HOST/live-timeline/taskpane.html"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://YOUR-HOST/live-timeline/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://YOUR-HOST/live-timeline/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="GetStarted.Title" DefaultValue="Live Timeline is ready"/>
+        <bt:String id="Group.Label" DefaultValue="Timeline"/>
+        <bt:String id="Button.Label" DefaultValue="Live Timeline"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="GetStarted.Description" DefaultValue="Select a slide with a year and quarter timeline table, then choose Home > Live Timeline."/>
+        <bt:String id="Button.Tooltip" DefaultValue="Adjust study starts, durations and review assumptions; the timeline on this slide redraws to match."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>
