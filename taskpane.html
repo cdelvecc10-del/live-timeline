@@ -3,17 +3,2037 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="ltl-version" content="1.0.1">
   <title>Live Timeline</title>
+  <script>
+    // Start-up guard: if anything fails to load or throws, say so in the pane instead of leaving it blank.
+    (function () {
+      var pending = null;
+      function show(msg) {
+        var s = document.getElementById('status');
+        if (!s) { pending = msg; return; }
+        s.textContent = msg;
+        s.className = 'status error';
+      }
+      window.__ltlShow = show;
+      window.addEventListener('error', function (e) {
+        var t = e && e.target;
+        if (t && t !== window && (t.src || t.href)) {
+          window.__ltlLoadError = 'Could not load ' + (t.src || t.href) + '. Check the internet connection, or that this file is on the hosting site.';
+          show(window.__ltlLoadError);
+        } else show('Problem: ' + ((e && e.message) || 'a script error'));
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e && e.reason;
+        show('Problem: ' + ((r && r.message) || String(r)));
+      });
+      document.addEventListener('DOMContentLoaded', function () { if (pending) show(pending); });
+    })();
+  </script>
   <!-- Office.js must load from Microsoft's CDN for add-ins; outside Office the pane falls back to preview mode. -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <link rel="stylesheet" href="styles.css">
-  <script src="src/engine.js"></script>
-  <script src="src/layout.js"></script>
-  <script src="src/calib.js"></script>
-  <script src="src/svg.js"></script>
-  <script src="src/powerpoint.js"></script>
-  <script src="src/sample.js"></script>
-  <script src="src/app.js"></script>
+  <style>
+/* Live Timeline task pane — Office-like look so it sits naturally next to PowerPoint. */
+:root {
+  --text: #242424; --muted: #616161; --line: #e0e0e0; --line2: #d1d1d1;
+  --bg: #ffffff; --bg2: #f7f7f7; --primary: #0f6cbd; --primary-h: #115ea3;
+  --warn-bg: #fff8e6; --warn: #8a5300; --err: #b10e1c; --ok: #0e700e;
+  --late: #c62828; --early: #2e7d32;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+body { font: 13px/1.4 "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", Arial, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+
+#app { display: block; }
+#stage { display: none; }
+body.mode-preview #app { display: flex; align-items: flex-start; gap: 20px; padding: 20px; background: #eef0f3; min-height: 100vh; }
+body.mode-preview #stage { display: block; flex: 1 1 auto; min-width: 0; position: sticky; top: 20px; }
+body.mode-preview #pane { flex: 0 0 380px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.06); max-height: calc(100vh - 40px); overflow: auto; }
+body.mode-preview .live, body.mode-preview #btnUpdate { display: none; }
+.slide { background: #fff; border-radius: 6px; box-shadow: 0 2px 14px rgba(0,0,0,.12); overflow: hidden; line-height: 0; }
+.slide svg { width: 100%; height: auto; display: block; }
+.slide g[data-key] { cursor: pointer; }
+@media (max-width: 980px) {
+  body.mode-preview #app { flex-direction: column; padding: 12px 16px; }
+  body.mode-preview #stage { position: static; width: 100%; }
+  body.mode-preview #pane { flex: none; width: 100%; max-height: none; }
+}
+
+.pane-head { padding: 12px 14px 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+.status { margin-top: 4px; font-size: 12px; color: var(--muted); min-height: 17px; }
+.status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.error { color: var(--err); } .status.busy { color: var(--primary); }
+
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px 4px; }
+.toolbar .live { margin-left: 2px; }
+.toolbar #btnUndo { margin-left: auto; }
+.source { display: grid; grid-template-columns: 1fr 64px; gap: 8px; padding: 6px 14px 10px; border-bottom: 1px solid var(--line); }
+.source label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+
+.btn { border: 1px solid var(--line2); background: #fff; border-radius: 4px; padding: 5px 10px; cursor: pointer; line-height: 1.3; }
+.btn:hover { background: #f5f5f5; }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.btn.primary:hover { background: var(--primary-h); }
+.btn.attention { box-shadow: 0 0 0 2px #ffd280; }
+.btn.danger { color: var(--err); }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+
+.in { border: 1px solid var(--line2); border-radius: 4px; padding: 4px 6px; background: #fff; width: 100%; min-width: 0; }
+.in:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: transparent; }
+.in.bad { border-color: var(--err); background: #fff5f5; }
+.in.num { width: 46px; text-align: center; }
+.in.month { width: 92px; text-align: center; }
+.in.mono, textarea.in { font-family: Consolas, "SFMono-Regular", Menlo, monospace; font-size: 11px; resize: vertical; }
+.hidden { display: none !important; }
+
+#content { padding: 4px 0 24px; }
+.card { margin: 10px 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 10px 6px; background: #fff; }
+.card.flash { animation: flash 1.2s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 3px #ffd280; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.card-head { display: flex; align-items: flex-start; gap: 6px; }
+.card-title { font-weight: 600; flex: 1 1 auto; min-width: 0; }
+.shift { display: flex; gap: 4px; flex: none; }
+.chip { border: 1px solid var(--line2); background: #fff; border-radius: 999px; padding: 1px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.chip:hover { background: #f2f2f2; }
+.chip.on { background: #e8f1fb; border-color: #8fb6e3; color: #0b4f8a; font-weight: 600; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.chain { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 6px; }
+.pill { border-radius: 4px; padding: 1px 6px; font-size: 11px; white-space: nowrap; background: #f1f1f1; color: #333; }
+.pill.p-ssd, .pill.p-pcd { background: #e9f5e3; color: #2f6b18; }
+.pill.p-d { background: #244EA2; color: #fff; }
+.pill.p-s { background: #E21860; color: #fff; }
+.pill.p-fda { background: #fff4c7; color: #5c4700; border: 1px solid #f0d36a; }
+.pill.p-acip { background: #f4f4f4; color: #333; }
+.pill b.late { color: var(--late); } .pill b.early { color: var(--early); }
+
+.grid { display: grid; gap: 6px; margin: 4px 0; }
+.row { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 8px; }
+.row .lbl { font-size: 12px; color: var(--muted); }
+.row .ctl { min-width: 0; }
+.hint { font-size: 11px; color: #8a8a8a; margin-top: 1px; }
+.stepper { display: flex; align-items: center; gap: 3px; }
+.step { width: 24px; height: 26px; border: 1px solid var(--line2); background: #fafafa; border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; padding: 0; }
+.step:hover { background: #eee; }
+.suffix { font-size: 11px; color: var(--muted); margin-left: 4px; }
+.check { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; }
+
+details.more { margin-top: 4px; }
+details.more > summary { font-size: 12px; color: var(--primary); cursor: pointer; padding: 3px 0; }
+details.sec { border-top: 1px solid var(--line); padding: 0 14px; }
+details.sec > summary { cursor: pointer; font-weight: 600; padding: 10px 0; display: flex; align-items: center; gap: 6px; list-style: none; }
+details.sec > summary::-webkit-details-marker { display: none; }
+details.sec > summary::before { content: '\203A'; display: inline-block; width: 10px; transition: transform .15s; color: var(--muted); }
+details.sec[open] > summary::before { transform: rotate(90deg); }
+details.sec > :not(summary) { margin-bottom: 8px; }
+.count { background: #eee; border-radius: 999px; padding: 0 7px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.count:empty { display: none; }
+.help { color: var(--muted); font-size: 12px; margin: 4px 0; }
+.help.small { font-size: 11px; }
+.note { font-size: 12px; padding: 5px 8px; border-radius: 4px; background: var(--bg2); margin: 4px 0; }
+.note.warn { background: var(--warn-bg); color: var(--warn); }
+.card-warn .note { margin: 2px 0 4px; }
+#warnings { margin: 6px 12px 0; }
+
+.proposals { display: grid; gap: 4px; margin: 6px 0; }
+.proposal { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; padding: 4px 6px; border-radius: 4px; background: var(--bg2); }
+.proposal s { color: #8a8a8a; }
+.row-inline { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.row-inline .in { flex: 1; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.tbl th { text-align: left; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); padding: 3px 4px; }
+.tbl td { border-bottom: 1px solid #f0f0f0; padding: 3px 4px; }
+.tbl th:not(:first-child), .tbl td:not(:first-child) { white-space: nowrap; }
+.tbl td.late { color: var(--late); font-weight: 600; } .tbl td.early { color: var(--early); font-weight: 600; }
+ol.log { list-style: none; padding: 0; margin: 4px 0; display: grid; gap: 6px; }
+ol.log li { font-size: 12px; padding: 0 0 6px; border-bottom: 1px solid #f0f0f0; }
+ol.log li:last-child { border-bottom: 0; }
+ol.log li.empty { border: 0; padding: 0; color: var(--muted); }
+ol.log .meta { color: var(--muted); font-size: 11px; }
+ol.log s { color: #8a8a8a; }
+ol.log .src { font-size: 11px; color: #5b5b5b; font-style: italic; }
+ul.rows { margin: 4px 0 8px; padding-left: 0; list-style: none; font-size: 12px; display: grid; gap: 2px; }
+ul.rows li { padding: 2px 8px; background: var(--bg2); border-radius: 4px; }
+.setup .card-title { margin-bottom: 4px; }
+.ver { padding: 8px 14px 14px; font-size: 10px; color: #9a9a9a; }
+body.mode-preview .ver { display: none; }
+
+</style>
+  <script>
+/*
+ * Live Timeline — scheduling rules engine.
+ * Pure functions, no DOM and no Office.js, so the same code runs in the task pane,
+ * in the browser preview and in Node tests.
+ *
+ * Dates are handled at month precision as a "month index": year * 12 + (month - 1).
+ */
+(function (root) {
+  'use strict';
+
+  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var SCHEMA = 'live-timeline/1';
+
+  var DEFAULT_RULES = {
+    reviewPriority: 8,      // months from BLA submission to approval with priority review / PRV (60-day filing + 6-month goal)
+    reviewStandard: 12,     // months from submission to approval with standard review (60-day filing + 10-month goal)
+    acipMonths: [2, 6, 10], // months in which ACIP is assumed to meet
+    acipMinGap: 1,          // ACIP vote at the first meeting at least this many months after approval
+    readoutLag: 2,          // months from primary completion (PCD) to topline data
+    submissionLag: 1,       // months from topline data to submission
+    pointLabels: 'quarter'  // how D and S markers are labelled: 'quarter' or 'month'
+  };
+
+  // Scenario input fields, in the order used by the task pane, the team-update table and the change log.
+  var FIELDS = [
+    { key: 'studyName', label: 'Study name', type: 'text' },
+    { key: 'ssd', label: 'Study start (SSD)', type: 'month' },
+    { key: 'studyMonths', label: 'Study length (months, SSD to PCD)', type: 'int' },
+    { key: 'readoutLag', label: 'Topline after PCD (months)', type: 'int', ruleDefault: 'readoutLag' },
+    { key: 'submissionLag', label: 'Submission after topline (months)', type: 'int', ruleDefault: 'submissionLag' },
+    { key: 'submission', label: 'Fixed submission date', type: 'month' },
+    { key: 'priorityReview', label: 'Priority review / PRV', type: 'bool' },
+    { key: 'reviewMonths', label: 'Review length override (months)', type: 'int' },
+    { key: 'approval', label: 'Fixed FDA approval date', type: 'month' },
+    { key: 'note', label: 'Note shown above the row', type: 'text' }
+  ];
+
+  var EVENT_KEYS = ['ssd', 'pcd', 'd', 's', 'fda', 'acip'];
+  var EVENT_NAMES = { ssd: 'Study start', pcd: 'Primary completion', d: 'Data readout', s: 'Submission', fda: 'FDA approval', acip: 'ACIP' };
+
+  // ---------- month helpers ----------
+  function mi(year, month) { return year * 12 + (month - 1); }
+  function yearOf(i) { return Math.floor(i / 12); }
+  function monthOf(i) { return ((i % 12) + 12) % 12 + 1; }
+  function yy(i) { var y = yearOf(i) % 100; return (y < 10 ? '0' : '') + y; }
+  function quarterOf(i) { return Math.floor((monthOf(i) - 1) / 3) + 1; }
+  function monthLabel(i) { return MONTHS[monthOf(i) - 1] + " '" + yy(i); }
+  function quarterLabel(i) { return quarterOf(i) + "Q '" + yy(i); }
+  function longMonth(i) { return MONTHS[monthOf(i) - 1] + ' ' + yearOf(i); }
+  function toYM(i) { var m = monthOf(i); return yearOf(i) + '-' + (m < 10 ? '0' : '') + m; }
+
+  function monthIndexOfName(name) {
+    var n = String(name).slice(0, 3).toLowerCase();
+    for (var k = 0; k < 12; k++) if (MONTHS[k].toLowerCase() === n) return k + 1;
+    return 0;
+  }
+  function fullYear(y) { y = Number(y); return y < 100 ? 2000 + y : y; }
+
+  /**
+   * Reads a month from the many ways people type dates:
+   * 2027-01, 2027/1, 01/2027, Jan 2027, Jan '27, Jan-27, January 2027, 4Q '26, Q4 2026, 1/15/2027,
+   * an Excel serial date, or an existing month index. Quarters map to their middle month.
+   * Returns a month index, or null when blank or unreadable.
+   */
+  function parseMonth(v) {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return isFinite(v) ? Math.round(v) : null;
+    var s = String(v).trim().replace(/[‘’`´]/g, "'");
+    if (!s) return null;
+    var m;
+    if ((m = s.match(/^(\d{4})[-\/.](\d{1,2})(?:[-\/.]\d{1,2})?$/))) return okMonth(+m[1], +m[2]);
+    if ((m = s.match(/^(\d{1,2})[-\/.](\d{4})$/))) return okMonth(+m[2], +m[1]);
+    if ((m = s.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{2,4})$/))) {
+      // Day/month order is ambiguous; treat as month/day unless the first number cannot be a month.
+      var a = +m[1], b = +m[2];
+      return okMonth(fullYear(m[3]), a > 12 ? b : a);
+    }
+    if ((m = s.match(/^([A-Za-z]{3,9})\.?[\s\-,]*'?(\d{2}|\d{4})$/))) {
+      var mon = monthIndexOfName(m[1]);
+      return mon ? mi(fullYear(m[2]), mon) : null;
+    }
+    if ((m = s.match(/^\d{1,2}[\s\-]([A-Za-z]{3,9})[\s\-,]*'?(\d{2}|\d{4})$/))) {
+      var mon2 = monthIndexOfName(m[1]);
+      return mon2 ? mi(fullYear(m[2]), mon2) : null;
+    }
+    if ((m = s.match(/^([1-4])\s*Q\s*'?(\d{2}|\d{4})$/i)) || (m = s.match(/^Q\s*([1-4])\s*'?(\d{2}|\d{4})$/i))) {
+      return mi(fullYear(m[2]), (+m[1] - 1) * 3 + 2);
+    }
+    if ((m = s.match(/^(\d{5})(?:\.\d+)?$/))) {
+      var d = new Date(Date.UTC(1899, 11, 30) + Number(m[1]) * 86400000);
+      return mi(d.getUTCFullYear(), d.getUTCMonth() + 1);
+    }
+    return null;
+  }
+  function okMonth(y, mo) { return (mo >= 1 && mo <= 12) ? mi(y, mo) : null; }
+
+  /** Normalises a month value to 'YYYY-MM' (or '' when blank). Unreadable text is returned unchanged so it can be flagged. */
+  function normMonth(v) {
+    if (v === null || v === undefined || String(v).trim() === '') return '';
+    var i = parseMonth(v);
+    return i === null ? String(v).trim() : toYM(i);
+  }
+
+  function num(v, dflt) {
+    if (v === '' || v === null || v === undefined) return dflt;
+    var n = Number(v);
+    return isFinite(n) ? n : dflt;
+  }
+
+  function nextAcip(fromIdx, months) {
+    var list = (months && months.length ? months : DEFAULT_RULES.acipMonths)
+      .map(Number).filter(function (x) { return x >= 1 && x <= 12; });
+    if (!list.length) return null;
+    for (var i = fromIdx; i < fromIdx + 36; i++) if (list.indexOf(monthOf(i)) >= 0) return i;
+    return null;
+  }
+
+  function rulesOf(model) {
+    var r = {}, k;
+    for (k in DEFAULT_RULES) r[k] = DEFAULT_RULES[k];
+    if (model && model.rules) for (k in model.rules) if (model.rules[k] !== undefined && model.rules[k] !== '') r[k] = model.rules[k];
+    return r;
+  }
+
+  /**
+   * Applies the rules to one scenario.
+   * SSD + study length -> PCD; PCD + topline lag -> D; D + submission lag -> S (unless a fixed submission date is set);
+   * S + review length (priority or standard) -> FDA approval (unless fixed); approval -> next ACIP meeting.
+   */
+  function computeScenario(sc, rules) {
+    rules = rules || DEFAULT_RULES;
+    var ev = { ssd: null, pcd: null, d: null, s: null, fda: null, acip: null };
+    var warnings = [];
+
+    var ssd = parseMonth(sc.ssd);
+    if (sc.ssd && ssd === null) warnings.push('Could not read the study start "' + sc.ssd + '"');
+    if (ssd !== null) {
+      var len = num(sc.studyMonths, null);
+      if (len === null || len < 0) { warnings.push('Study length is missing'); len = 0; }
+      ev.ssd = ssd;
+      ev.pcd = ssd + Math.round(len);
+      if (sc.showReadout !== false) ev.d = ev.pcd + Math.round(num(sc.readoutLag, rules.readoutLag));
+    }
+
+    var subFixed = parseMonth(sc.submission);
+    if (sc.submission && subFixed === null) warnings.push('Could not read the submission date "' + sc.submission + '"');
+    if (subFixed !== null) ev.s = subFixed;
+    else if (ev.d !== null) ev.s = ev.d + Math.round(num(sc.submissionLag, rules.submissionLag));
+    else if (ev.pcd !== null) ev.s = ev.pcd + Math.round(num(sc.readoutLag, rules.readoutLag)) + Math.round(num(sc.submissionLag, rules.submissionLag));
+
+    var review = Math.round(num(sc.reviewMonths, sc.priorityReview ? rules.reviewPriority : rules.reviewStandard));
+    var apFixed = parseMonth(sc.approval);
+    if (sc.approval && apFixed === null) warnings.push('Could not read the approval date "' + sc.approval + '"');
+    if (apFixed !== null) ev.fda = apFixed;
+    else if (ev.s !== null) ev.fda = ev.s + review;
+
+    if (ev.fda !== null && sc.showAcip !== false) ev.acip = nextAcip(ev.fda + Math.round(num(rules.acipMinGap, 1)), rules.acipMonths);
+
+    if (ev.d !== null && ev.s !== null && ev.s < ev.d) warnings.push('Submission is earlier than the data readout');
+    if (ev.ssd !== null && ev.s !== null && ev.s < ev.ssd) warnings.push('Submission is earlier than the study start');
+    if (ev.s !== null && ev.fda !== null && ev.fda <= ev.s) warnings.push('Approval is not after submission');
+    if (ev.ssd === null && ev.s === null) warnings.push('Set a study start or a fixed submission date');
+
+    return { id: sc.id, events: ev, review: review, warnings: warnings };
+  }
+
+  function computeAll(model) {
+    var rules = rulesOf(model);
+    return (model.scenarios || []).map(function (sc) { return computeScenario(sc, rules); });
+  }
+
+  /** Text labels in the slide's conventions (SSD/PCD/FDA/ACIP by month; D and S by quarter unless set to month). */
+  function labels(ev, rules) {
+    var pt = (rules && rules.pointLabels === 'month') ? monthLabel : quarterLabel;
+    return {
+      ssd: ev.ssd === null ? '' : 'SSD ' + monthLabel(ev.ssd),
+      pcd: ev.pcd === null ? '' : 'PCD ' + monthLabel(ev.pcd),
+      d: ev.d === null ? '' : pt(ev.d),
+      s: ev.s === null ? '' : pt(ev.s),
+      fda: ev.fda === null ? '' : 'FDA ' + monthLabel(ev.fda),
+      acip: ev.acip === null ? '' : 'ACIP ' + monthLabel(ev.acip)
+    };
+  }
+
+  // ---------- model helpers ----------
+  function blankScenario(i) {
+    return {
+      id: 's' + (i + 1), name: 'Scenario ' + (i + 1), row: i,
+      studyName: 'Ph3', ssd: '', studyMonths: 12, readoutLag: '', submissionLag: '',
+      submission: '', priorityReview: false, reviewMonths: '', approval: '',
+      showAcip: true, note: '', highlightAcip: false
+    };
+  }
+
+  function normalizeModel(m) {
+    m = m ? JSON.parse(JSON.stringify(m)) : {};
+    m.schema = SCHEMA;
+    if (!Array.isArray(m.scenarios)) m.scenarios = [];
+    m.rules = Object.assign({}, DEFAULT_RULES, m.rules || {});
+    if (!Array.isArray(m.rules.acipMonths)) m.rules.acipMonths = DEFAULT_RULES.acipMonths.slice();
+    m.scenarios = m.scenarios.map(function (sc, i) {
+      var b = blankScenario(i), out = Object.assign(b, sc);
+      if (!out.id) out.id = 's' + (i + 1);
+      if (out.row === undefined || out.row === null || out.row === '') out.row = i;
+      ['ssd', 'submission', 'approval'].forEach(function (k) { out[k] = normMonth(out[k]); });
+      return out;
+    });
+    if (m.showToday === undefined) m.showToday = true;
+    if (!Array.isArray(m.changelog)) m.changelog = [];
+    if (m.baseline === undefined) m.baseline = null;
+    if (m.showSlippage === undefined) m.showSlippage = false;
+    return m;
+  }
+
+  function snapshot(model, label) {
+    var events = {};
+    computeAll(model).forEach(function (r) {
+      var e = {};
+      EVENT_KEYS.forEach(function (k) { e[k] = r.events[k] === null ? '' : toYM(r.events[k]); });
+      events[r.id] = e;
+    });
+    return { label: label || 'Baseline', savedAt: new Date().toISOString(), events: events };
+  }
+
+  /** Month differences between the current schedule and the saved baseline, per scenario and event. */
+  function deltas(model) {
+    var out = {};
+    if (!model.baseline || !model.baseline.events) return out;
+    computeAll(model).forEach(function (r) {
+      var b = model.baseline.events[r.id];
+      if (!b) return;
+      var d = {};
+      EVENT_KEYS.forEach(function (k) {
+        var bi = parseMonth(b[k]), ci = r.events[k];
+        d[k] = (bi === null || ci === null) ? null : ci - bi;
+      });
+      out[r.id] = { delta: d, base: b };
+    });
+    return out;
+  }
+
+  function fieldValueText(f, v) {
+    if (f.type === 'bool') return v ? 'Y' : 'N';
+    if (f.type === 'month') { var i = parseMonth(v); return i === null ? (v || '') : longMonth(i); }
+    return (v === null || v === undefined) ? '' : String(v);
+  }
+
+  function fieldByKey(key) { for (var i = 0; i < FIELDS.length; i++) if (FIELDS[i].key === key) return FIELDS[i]; return null; }
+
+  function coerce(f, raw) {
+    var s = (raw === null || raw === undefined) ? '' : String(raw).trim();
+    if (f.type === 'bool') return /^(y|yes|true|1|x|prv|priority)$/i.test(s);
+    if (f.type === 'int') { if (s === '') return ''; var n = Number(s.replace(/[^\d.\-]/g, '')); return isFinite(n) ? Math.round(n) : ''; }
+    if (f.type === 'month') return normMonth(s);
+    return s;
+  }
+
+  function sameValue(f, a, b) {
+    if (f.type === 'bool') return !!a === !!b;
+    if (f.type === 'month') return normMonth(a) === normMonth(b);
+    return String(a === null || a === undefined ? '' : a) === String(b === null || b === undefined ? '' : b);
+  }
+
+  /** Tab-separated table of scenario inputs for the team to edit in Excel, Teams or email. */
+  function toTSV(model) {
+    var head = ['ID', 'Scenario'].concat(FIELDS.map(function (f) { return f.label; }));
+    var rows = [head.join('\t')];
+    (model.scenarios || []).forEach(function (sc) {
+      rows.push([sc.id, sc.name].concat(FIELDS.map(function (f) { return fieldValueText(f, sc[f.key]).replace(/[\t\r\n]+/g, ' '); })).join('\t'));
+    });
+    return rows.join('\n');
+  }
+
+  /**
+   * Reads a pasted table (tab- or comma-separated, header row required) and returns the proposed changes
+   * without applying them: [{ id, name, key, label, from, to }], plus problems found while reading.
+   */
+  function parseUpdates(model, text) {
+    var lines = String(text || '').replace(/\r/g, '').split('\n').filter(function (l) { return l.trim() !== ''; });
+    var problems = [], changes = [];
+    if (lines.length < 2) return { changes: changes, problems: ['Paste the header row and at least one scenario row.'] };
+    var sep = lines[0].indexOf('\t') >= 0 ? '\t' : ',';
+    var split = function (l) { return sep === '\t' ? l.split('\t') : splitCSV(l); };
+    var head = split(lines[0]).map(function (h) { return h.trim().toLowerCase(); });
+    var col = {};
+    head.forEach(function (h, i) {
+      if (h === 'id') col.id = i;
+      else if (h === 'scenario') col.name = i;
+      else FIELDS.forEach(function (f) { if (h === f.label.toLowerCase() || h === f.key.toLowerCase()) col[f.key] = i; });
+    });
+    if (col.id === undefined && col.name === undefined) problems.push('No "ID" or "Scenario" column found in the header row.');
+    lines.slice(1).forEach(function (l, n) {
+      var cells = split(l);
+      var id = col.id !== undefined ? String(cells[col.id] || '').trim() : '';
+      var name = col.name !== undefined ? String(cells[col.name] || '').trim() : '';
+      var sc = null;
+      (model.scenarios || []).forEach(function (s) { if ((id && s.id === id) || (!sc && name && s.name.trim().toLowerCase() === name.toLowerCase())) sc = sc || s; });
+      if (!sc) { problems.push('Row ' + (n + 2) + ': no scenario matches "' + (id || name) + '"'); return; }
+      FIELDS.forEach(function (f) {
+        if (col[f.key] === undefined) return;
+        var raw = cells[col[f.key]];
+        if (raw === undefined) return;
+        var v = coerce(f, raw);
+        if (f.type === 'month' && v && parseMonth(v) === null) { problems.push(sc.id + ' ' + f.label + ': could not read "' + raw + '"'); return; }
+        if (!sameValue(f, sc[f.key], v)) changes.push({ id: sc.id, name: sc.name, key: f.key, label: f.label, from: sc[f.key], to: v });
+      });
+    });
+    return { changes: changes, problems: problems };
+  }
+
+  function splitCSV(line) {
+    var out = [], cur = '', q = false;
+    for (var i = 0; i < line.length; i++) {
+      var c = line[i];
+      if (q) { if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; }
+      else if (c === '"') q = true; else if (c === ',') { out.push(cur); cur = ''; } else cur += c;
+    }
+    out.push(cur);
+    return out;
+  }
+
+  /** Field-level differences between two versions of a scenario (for the change log). */
+  function diffScenario(a, b) {
+    var out = [];
+    FIELDS.forEach(function (f) { if (!sameValue(f, a[f.key], b[f.key])) out.push({ key: f.key, label: f.label, from: a[f.key], to: b[f.key] }); });
+    return out;
+  }
+
+  var api = {
+    SCHEMA: SCHEMA, MONTHS: MONTHS, DEFAULT_RULES: DEFAULT_RULES, FIELDS: FIELDS, EVENT_KEYS: EVENT_KEYS, EVENT_NAMES: EVENT_NAMES,
+    mi: mi, yearOf: yearOf, monthOf: monthOf, quarterOf: quarterOf, monthLabel: monthLabel, quarterLabel: quarterLabel,
+    longMonth: longMonth, toYM: toYM, parseMonth: parseMonth, normMonth: normMonth, nextAcip: nextAcip,
+    rulesOf: rulesOf, computeScenario: computeScenario, computeAll: computeAll, labels: labels,
+    blankScenario: blankScenario, normalizeModel: normalizeModel, snapshot: snapshot, deltas: deltas,
+    fieldByKey: fieldByKey, fieldValueText: fieldValueText, coerce: coerce, sameValue: sameValue,
+    toTSV: toTSV, parseUpdates: parseUpdates, diffScenario: diffScenario
+  };
+
+  root.LT = root.LT || {};
+  root.LT.engine = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+  <script>
+/*
+ * Live Timeline — layout engine.
+ * Turns the computed schedule into a flat list of shape specs (points, slide coordinates) in the visual
+ * language of the reference slide: green study bar, D / S circles, dashed FDA review box, gold approval star,
+ * month labels for SSD / PCD / FDA / ACIP, quarter labels under D and S, and a dashed "Today" line.
+ * The same specs are drawn by three renderers: PowerPoint (Office.js), SVG (browser preview) and python-pptx (tests).
+ */
+(function (root) {
+  'use strict';
+  var E = (root.LT && root.LT.engine) || (typeof require !== 'undefined' ? require('./engine.js') : null);
+
+  // Arial (metric-compatible with Helvetica) advance widths, 1/1000 em, for ASCII 32..126.
+  var W_REG = [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584];
+  var W_BOLD = [278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556, 333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584];
+  var W_EXTRA = { '‘': [222, 278], '’': [222, 278], '“': [333, 500], '”': [333, 500], '–': [556, 556], '—': [1000, 1000], '−': [584, 584], '→': [1000, 1000], 'Δ': [668, 668] };
+
+  function textWidth(str, size, bold) {
+    var t = 0, s = String(str || '');
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i), w;
+      if (c >= 32 && c <= 126) w = (bold ? W_BOLD : W_REG)[c - 32];
+      else if (W_EXTRA[s[i]]) w = W_EXTRA[s[i]][bold ? 1 : 0];
+      else w = 556;
+      t += w;
+    }
+    return t * size / 1000;
+  }
+
+  var DEFAULT_STYLE = {
+    barH: 16, barFill: '#69B445', barText: '#FFFFFF', barTextSize: 9,
+    labelColor: '#595959', labelSize: 9, labelH: 12,
+    qColor: '#333333', qSize: 8,
+    marker: 14, dFill: '#244EA2', sFill: '#E21860', markerLine: '#FFFFFF', markerLineW: 1, markerTextSize: 8,
+    reviewH: 10, reviewFill: '#DDEFD3', reviewLine: '#69B445', reviewLineW: 0.75, reviewText: '#595959', reviewTextSize: 8,
+    star: 16, starFill: '#FFC709', starLine: '#8A6A00', starLineW: 0.75,
+    apColor: '#333333', apSize: 9, apLineH: 10.5, highlight: '#E21860',
+    noteColor: '#595959', noteSize: 9,
+    todayColor: '#F36633', todayLineW: 0.75, todayTagW: 36, todayTagH: 13, todaySize: 8,
+    ghost: '#8C8C8C', later: '#C62828', earlier: '#2E7D32'
+  };
+
+  function styleOf(model) {
+    var s = {}, k;
+    for (k in DEFAULT_STYLE) s[k] = DEFAULT_STYLE[k];
+    if (model && model.style) for (k in model.style) s[k] = model.style[k];
+    return s;
+  }
+
+  function overlaps(a, b, pad) {
+    pad = pad || 0;
+    return a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h && b.y < a.y + a.h;
+  }
+
+  function asOfMonth(asOf) {
+    var d;
+    if (asOf instanceof Date) d = asOf;
+    else if (typeof asOf === 'string' && /^\d{4}-\d{2}-\d{2}/.test(asOf)) {
+      var p = asOf.split('-');
+      d = new Date(+p[0], +p[1] - 1, +p[2].slice(0, 2));
+    } else d = new Date();
+    var dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    return E.mi(d.getFullYear(), d.getMonth() + 1) + (d.getDate() - 1) / dim;
+  }
+
+  /**
+   * @param {any} model      timeline model (see engine.normalizeModel)
+   * @param {any} cal        calibration: { axis:{startMonth,endMonth,left,right}, lanes:[{top,bottom}], gridTop, gridBottom }
+   * @param {any} [opts]     { asOf: Date|'YYYY-MM-DD' }
+   * @returns {{specs: Array<object>, warnings: Array<string>}}
+   */
+  function build(model, cal, opts) {
+    opts = opts || {};
+    var st = styleOf(model), rules = E.rulesOf(model);
+    var ax = cal.axis;
+    var mw = (ax.right - ax.left) / (ax.endMonth - ax.startMonth);
+    var X = function (m) { return ax.left + (m - ax.startMonth) * mw; };
+    var inAxis = function (m) { return m !== null && m >= ax.startMonth && m < ax.endMonth; };
+    var layers = [[], [], [], [], [], []]; // 0 today line, 1 bars/boxes, 2 baseline ghosts, 3 markers, 4 labels, 5 today tag
+    var warnings = [];
+    var deltas = (model.showSlippage && model.baseline) ? E.deltas(model) : {};
+    var axisText = E.quarterLabel(ax.startMonth) + ' to ' + E.quarterLabel(ax.endMonth - 1);
+
+    function textSpec(key, name, x, y, w, h, runs, align, extra) {
+      var s = { key: key, name: name, geom: 'text', x: x, y: y, w: w, h: h, fill: null, line: null, text: { runs: runs, align: align || 'l' } };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      return s;
+    }
+    function run(t, size, color, bold) { return { t: t, size: size, color: color, bold: !!bold }; }
+
+    (model.scenarios || []).forEach(function (sc, idx) {
+      var lane = cal.lanes[(sc.row === undefined || sc.row === '') ? idx : Number(sc.row)];
+      var tag = sc.id;
+      var label = (sc.name || sc.id);
+      if (!lane) { warnings.push(label + ': no matching row in the table'); return; }
+      var cy = (lane.top + lane.bottom) / 2;
+      var r = E.computeScenario(sc, rules);
+      var ev = r.events;
+      var L = E.labels(ev, rules);
+      r.warnings.forEach(function (w) { warnings.push(label + ': ' + w); });
+      var above = [];   // label boxes above the lane line
+      var below = [];   // label boxes below the lane line
+      var chainStart = null;
+      var nm = function (role) { return 'LTL|' + tag + '|' + role; };
+
+      ['ssd', 's', 'fda'].forEach(function (k) {
+        if (ev[k] !== null && !inAxis(ev[k])) warnings.push(label + ': ' + E.EVENT_NAMES[k] + ' (' + E.monthLabel(ev[k]) + ') is outside the timeline (' + axisText + ')');
+      });
+
+      // ---- study bar, SSD and PCD labels ----
+      if (ev.ssd !== null) {
+        var x1 = Math.max(X(ev.ssd), ax.left), x2 = Math.min(X(ev.pcd + 1), ax.right);
+        if (x2 > x1 + 0.5) {
+          chainStart = x1;
+          var bar = { key: tag + '.bar', name: nm('Study bar'), geom: 'roundRect', x: x1, y: cy - st.barH / 2, w: x2 - x1, h: st.barH, fill: st.barFill, line: null, text: null };
+          var nameW = textWidth(sc.studyName, st.barTextSize, true);
+          if (sc.studyName && nameW + 6 <= bar.w) bar.text = { runs: [run(sc.studyName, st.barTextSize, st.barText, true)], align: 'c' };
+          else if (sc.studyName) above.push(textSpec(tag + '.barname', nm('Study name'), x1, cy - st.barH / 2 - 1.3 - st.labelH, nameW + 2, st.labelH, [run(sc.studyName, st.labelSize, '#333333', true)], 'l'));
+          layers[1].push(bar);
+
+          var ssdW = textWidth(L.ssd, st.labelSize) + 2;
+          if (x1 - 3.3 - ssdW >= ax.left - 1) {
+            layers[4].push(textSpec(tag + '.ssd', nm('SSD label'), x1 - 3.3 - ssdW, cy - st.labelH / 2, ssdW, st.labelH, [run(L.ssd, st.labelSize, st.labelColor)], 'r'));
+            chainStart = x1 - 3.3 - ssdW;
+          } else {
+            above.push(textSpec(tag + '.ssd', nm('SSD label'), x1, cy - st.barH / 2 - 1.3 - st.labelH, ssdW, st.labelH, [run(L.ssd, st.labelSize, st.labelColor)], 'l'));
+          }
+          var pcdW = textWidth(L.pcd, st.labelSize) + 2;
+          above.push(textSpec(tag + '.pcd', nm('PCD label'), x2 - pcdW, cy - st.barH / 2 - 1.3 - st.labelH, pcdW, st.labelH, [run(L.pcd, st.labelSize, st.labelColor)], 'r'));
+        }
+      }
+
+      // ---- D and S markers ----
+      var R = st.marker / 2;
+      var xd = (ev.d !== null && inAxis(ev.d)) ? X(ev.d + 0.5) : null;
+      var xs = (ev.s !== null && inAxis(ev.s)) ? X(ev.s + 0.5) : null;
+      if (xd !== null && xs !== null && xs - xd < st.marker + 1) xd = xs - st.marker - 1;   // keep the circles apart
+      var xf = (ev.fda !== null && inAxis(ev.fda)) ? X(ev.fda + 0.5) : null;
+
+      // Baseline approval (when showing slippage): a hollow star where approval sat in the saved baseline.
+      var dl = deltas[sc.id];
+      var ghostX = null;
+      if (dl && dl.delta.fda && xf !== null) {
+        var bf = E.parseMonth(dl.base.fda);
+        if (inAxis(bf)) {
+          ghostX = X(bf + 0.5);
+          layers[2].push({ key: tag + '.ghost', name: nm('Baseline approval'), geom: 'star5', x: ghostX - st.star / 2, y: cy - st.star / 2, w: st.star, h: st.star, fill: '#FFFFFF', line: { color: st.ghost, w: 1, dash: 'solid' }, text: null });
+        }
+      }
+
+      // FDA review box from submission to approval; its label sits in the widest free stretch of the box.
+      if (xs !== null && xf !== null && xf - xs > 2) {
+        layers[1].push({ key: tag + '.review', name: nm('FDA review'), geom: 'rect', x: xs, y: cy - st.reviewH / 2, w: xf - xs, h: st.reviewH, fill: st.reviewFill, line: { color: st.reviewLine, w: st.reviewLineW, dash: 'dash' }, text: null });
+        var free = [[xs + R + 1, xf - st.star / 2 - 1]];
+        if (ghostX !== null && ghostX > free[0][0] && ghostX < free[0][1]) free = [[free[0][0], ghostX - st.star / 2 - 1], [ghostX + st.star / 2 + 1, free[0][1]]];
+        free.sort(function (a, b) { return (b[1] - b[0]) - (a[1] - a[0]); });
+        var rw = textWidth('FDA review', st.reviewTextSize) + 4;
+        if (free[0][1] - free[0][0] >= rw) {
+          var rc = (free[0][0] + free[0][1]) / 2;
+          layers[4].push(textSpec(tag + '.reviewlbl', nm('FDA review label'), rc - rw / 2, cy - st.labelH / 2, rw, st.labelH, [run('FDA review', st.reviewTextSize, st.reviewText)], 'c'));
+        }
+      }
+
+      [['d', xd, st.dFill, 'D', 'Data readout'], ['s', xs, st.sFill, 'S', 'Submission']].forEach(function (m) {
+        var k = m[0], x = m[1];
+        if (x === null) return;
+        if (chainStart === null || x - R < chainStart) chainStart = Math.min(chainStart === null ? Infinity : chainStart, x - R);
+        layers[3].push({ key: tag + '.' + k, name: nm(m[4]), geom: 'ellipse', x: x - R, y: cy - R, w: st.marker, h: st.marker, fill: m[2], line: { color: st.markerLine, w: st.markerLineW, dash: 'solid' }, text: { runs: [run(m[3], st.markerTextSize, '#FFFFFF', true)], align: 'c' } });
+        var qt = L[k], qw = textWidth(qt, st.qSize) + 4;
+        below.push(textSpec(tag + '.' + k + 'q', nm(m[4] + ' label'), x - qw / 2, cy + 9, qw, st.labelH, [run(qt, st.qSize, st.qColor)], 'c', { anchorX: x }));
+      });
+
+      // ---- approval star and approval / ACIP labels ----
+      if (xf !== null) {
+        if (chainStart === null) chainStart = xf - st.star / 2;
+        layers[3].push({ key: tag + '.star', name: nm('FDA approval'), geom: 'star5', x: xf - st.star / 2, y: cy - st.star / 2, w: st.star, h: st.star, fill: st.starFill, line: { color: st.starLine, w: st.starLineW, dash: 'solid' }, text: null });
+        var fdaRuns = [run(L.fda, st.apSize, st.apColor)];
+        if (dl && dl.delta.fda) {
+          var d = dl.delta.fda;
+          fdaRuns.push(run(' ' + (d > 0 ? '+' : '−') + Math.abs(d) + ' mo', st.apSize, d > 0 ? st.later : st.earlier, true));
+        }
+        var lines = [fdaRuns];
+        if (L.acip) lines.push([run(L.acip, st.apSize, sc.highlightAcip ? st.highlight : st.apColor)]);
+        var widths = lines.map(function (rs) { return rs.reduce(function (a, q) { return a + textWidth(q.t, q.size, q.bold); }, 0) + 2; });
+        var maxW = Math.max.apply(null, widths);
+        var lx = xf + st.star / 2 + 0.5;
+        if (ghostX !== null && ghostX > xf && ghostX - st.star / 2 < lx + maxW) lx = ghostX + st.star / 2 + 1;
+        var totalH = st.apLineH * lines.length;
+        if (lx + maxW <= ax.right + 6) {
+          lines.forEach(function (rs, i) {
+            layers[4].push(textSpec(tag + '.ap' + i, nm(i === 0 ? 'FDA approval label' : 'ACIP label'), lx, cy - totalH / 2 + i * st.apLineH, widths[i], st.apLineH, rs, 'l'));
+          });
+        } else {
+          // No room before the "Why" column: stack the labels under the star instead.
+          lines.forEach(function (rs, i) {
+            below.push(textSpec(tag + '.ap' + i, nm(i === 0 ? 'FDA approval label' : 'ACIP label'), xf - widths[i] / 2, cy + 9 + i * st.apLineH, widths[i], st.apLineH, rs, 'c', { anchorX: xf, stackWith: tag + '.ap' }));
+          });
+        }
+      }
+
+      // ---- optional note above the row ----
+      if (sc.note && chainStart !== null) {
+        var nw = textWidth(sc.note, st.noteSize) + 2;
+        var nx = Math.min(Math.max(chainStart, ax.left + 2), ax.right - nw);
+        above.push(textSpec(tag + '.note', nm('Note'), nx, cy - 33.5, nw, st.labelH, [run(sc.note, st.noteSize, st.noteColor)], 'l', { prefLevel: 1 }));
+      }
+
+      resolveAbove(above, st.labelH);
+      resolveBelow(below);
+      above.concat(below).forEach(function (s) { delete s.anchorX; delete s.stackWith; delete s.prefLevel; layers[4].push(s); });
+    });
+
+    // ---- Today line and tag ----
+    if (model.showToday !== false) {
+      var tm = asOfMonth(opts.asOf || model.asOf || null);
+      if (tm >= ax.startMonth && tm < ax.endMonth) {
+        var tx = X(tm);
+        var tagTop = cal.gridBottom + 14.2;
+        var y0 = cal.gridTop + 7.6, y1 = tagTop + st.todayTagH / 2;
+        // Leave a gap wherever a label sits on the line, so the dashes never run through text.
+        var gaps = layers[4].filter(function (s) { return s.x - 1.5 <= tx && tx <= s.x + s.w + 1.5; })
+          .map(function (s) { return [s.y - 1, s.y + s.h + 1]; })
+          .sort(function (a, b) { return a[0] - b[0]; });
+        var segs = [], cur = y0;
+        gaps.forEach(function (g) { if (g[0] > cur) segs.push([cur, Math.min(g[0], y1)]); cur = Math.max(cur, g[1]); });
+        if (cur < y1) segs.push([cur, y1]);
+        segs.filter(function (q) { return q[1] - q[0] >= 2; }).forEach(function (q, i) {
+          layers[0].push({ key: 'today.line' + (i ? '.' + i : ''), name: 'LTL|today|Today line', geom: 'line', x: tx, y: q[0], w: 0, h: q[1] - q[0], fill: null, line: { color: st.todayColor, w: st.todayLineW, dash: 'sysDash' }, text: null });
+        });
+        layers[5].push({ key: 'today.tag', name: 'LTL|today|Today tag', geom: 'roundRect', x: tx - st.todayTagW / 2, y: tagTop, w: st.todayTagW, h: st.todayTagH, fill: st.todayColor, line: null, text: { runs: [run('Today', st.todaySize, '#FFFFFF', true)], align: 'c' } });
+      }
+    }
+
+    var specs = [].concat.apply([], layers);
+    specs.forEach(function (s) { ['x', 'y', 'w', 'h'].forEach(function (k) { s[k] = Math.round(s[k] * 100) / 100; }); });
+    return { specs: specs, warnings: warnings };
+  }
+
+  // Labels above the lane: keep each on its preferred level, lift one level when it would overlap another.
+  function resolveAbove(list, lh) {
+    list.sort(function (a, b) { return (a.prefLevel || 0) - (b.prefLevel || 0) || a.x - b.x; });
+    var placed = [];
+    list.forEach(function (s) {
+      var guard = 0;
+      while (placed.some(function (p) { return overlaps(p, s, 2); }) && guard++ < 4) s.y -= lh;
+      placed.push(s);
+    });
+  }
+
+  // Labels below the lane: merge identical neighbours (e.g. D and S in the same quarter), otherwise push right.
+  function resolveBelow(list) {
+    var stacks = list.filter(function (s) { return s.stackWith; });
+    var singles = list.filter(function (s) { return !s.stackWith; }).sort(function (a, b) { return a.x - b.x; });
+    for (var i = 1; i < singles.length; i++) {
+      var a = singles[i - 1], b = singles[i];
+      if (!overlaps(a, b, 2)) continue;
+      if (a.text.runs[0].t === b.text.runs[0].t) {
+        var mid = (a.anchorX + b.anchorX) / 2;
+        a.x = mid - a.w / 2;
+        a.anchorX = mid;
+        a.name = a.name.replace(/\|[^|]*$/, '|Readout and submission label');
+        singles.splice(i, 1); list.splice(list.indexOf(b), 1); i--;
+      } else {
+        var push = (a.x + a.w + 2) - b.x;
+        a.x -= push / 2; b.x += push / 2;
+      }
+    }
+    // A stacked approval label below the star moves down past any marker label it would hit.
+    if (stacks.length) {
+      var hit = stacks.some(function (s) { return singles.some(function (q) { return overlaps(q, s, 1); }); });
+      if (hit) stacks.forEach(function (s) { s.y += 12; });
+    }
+  }
+
+  var api = { build: build, textWidth: textWidth, DEFAULT_STYLE: DEFAULT_STYLE, styleOf: styleOf, asOfMonth: asOfMonth };
+  root.LT = root.LT || {};
+  root.LT.layout = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+  <script>
+/*
+ * Live Timeline — reading the time axis and scenario rows from a timeline table.
+ * Pure functions: the PowerPoint layer passes in the table's text, column widths and row heights (points).
+ */
+(function (root) {
+  'use strict';
+  var E = (root.LT && root.LT.engine) || (typeof require !== 'undefined' ? require('./engine.js') : null);
+
+  var RE_Q = /^\s*(?:([1-4])\s*Q|Q\s*([1-4]))\s*$/i;
+  var RE_H = /^\s*(?:([12])\s*H|H\s*([12]))\s*$/i;
+  var RE_Y = /^\s*(?:FY\s*)?'?(\d{4}|\d{2})\s*$/i;
+
+  function clean(v) { return String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim(); }
+  function sum(a, from, to) { var t = 0; for (var i = from; i < to; i++) t += a[i]; return t; }
+
+  /** Finds the period columns of a header row. Returns { unit, cols:[{c, n}] } or null. */
+  function periodColumns(row) {
+    var qs = [], hs = [], ms = [];
+    row.forEach(function (v, c) {
+      var s = clean(v), m;
+      if ((m = s.match(RE_Q))) qs.push({ c: c, n: +(m[1] || m[2]) });
+      else if ((m = s.match(RE_H))) hs.push({ c: c, n: +(m[1] || m[2]) });
+      else if (s.length >= 3 && /^[A-Za-z]{3,9}$/.test(s) && E.parseMonth(s + ' 2000') !== null) ms.push({ c: c, n: E.monthOf(E.parseMonth(s + ' 2000')) });
+    });
+    if (qs.length >= 2) return { unit: 3, cols: qs };
+    if (ms.length >= 2) return { unit: 1, cols: ms };
+    if (hs.length >= 2) return { unit: 6, cols: hs };
+    return null;
+  }
+
+  /**
+   * @param {{left:number, top:number}} geom  table position on the slide (points)
+   * @param {string[][]} values               cell text (merged cells may be blank)
+   * @param {number[]} colW                   column widths (points)
+   * @param {number[]} rowH                   rendered row heights (points)
+   * @returns calibration or null when the table does not look like a timeline
+   */
+  function fromTable(geom, values, colW, rowH) {
+    if (!values || !values.length || !colW || !rowH) return null;
+    var nR = values.length;
+    var yearRow = -1, unitRow = -1, per = null;
+    for (var r = 0; r < Math.min(nR, 4); r++) {
+      var p = periodColumns(values[r]);
+      if (p) { unitRow = r; per = p; break; }
+    }
+    // Year header: the row (at or above the period row) with at least two year-like cells.
+    for (var ry = 0; ry <= Math.max(unitRow, Math.min(nR - 1, 2)); ry++) {
+      var years = values[ry].filter(function (v) { var s = clean(v); return RE_Y.test(s) && (s.length >= 4 || /'/.test(s) || /FY/i.test(s)); });
+      if (years.length >= 2 || (per && years.length >= 1 && ry < unitRow)) { yearRow = ry; break; }
+    }
+    if (yearRow < 0) return null;
+
+    // Year for each column: carry the last year seen from the left (merged year cells span their quarters).
+    var yearAt = [], last = null;
+    values[yearRow].forEach(function (v, c) {
+      var m = clean(v).match(RE_Y);
+      if (m && (clean(v).length >= 4 || /'/.test(v) || /FY/i.test(v))) last = Number(m[1]) < 100 ? 2000 + Number(m[1]) : Number(m[1]);
+      yearAt[c] = last;
+    });
+
+    var cols, unit;
+    if (per) { cols = per.cols; unit = per.unit; }
+    else {
+      unit = 12;
+      cols = [];
+      values[yearRow].forEach(function (v, c) { if (RE_Y.test(clean(v)) && clean(v).length >= 2) cols.push({ c: c, n: 1 }); });
+    }
+    if (cols.length < 2) return null;
+    // Columns must be contiguous.
+    for (var i = 1; i < cols.length; i++) if (cols[i].c !== cols[i - 1].c + 1) return null;
+    var c0 = cols[0].c, cN = cols[cols.length - 1].c;
+    var y0 = yearAt[c0];
+    if (!y0) return null;
+    var startMonth = E.mi(y0, (cols[0].n - 1) * unit + 1);
+    var endMonth = startMonth + unit * cols.length;
+
+    var left = geom.left + sum(colW, 0, c0);
+    var right = left + sum(colW, c0, cN + 1);
+    var headerRows = Math.max(yearRow, unitRow) + 1;
+    var lanes = [], names = [];
+    for (var rr = headerRows; rr < nR; rr++) {
+      var top = geom.top + sum(rowH, 0, rr);
+      lanes.push({ top: round(top), bottom: round(top + rowH[rr]) });
+      var name = '';
+      for (var cc = 0; cc < c0 && !name; cc++) name = clean(values[rr][cc]);
+      names.push(name);
+    }
+    if (!lanes.length) return null;
+    return {
+      axis: { startMonth: startMonth, endMonth: endMonth, left: round(left), right: round(right) },
+      lanes: lanes, names: names,
+      gridTop: lanes[0].top, gridBottom: lanes[lanes.length - 1].bottom,
+      source: 'table'
+    };
+  }
+
+  function round(v) { return Math.round(v * 100) / 100; }
+
+  /**
+   * Picks hand-drawn timeline shapes (from before the add-in) so they can be removed once.
+   * shapes: [{id, name, type, left, top, width, height}] in points.
+   */
+  function legacyCandidates(shapes, cal) {
+    var ax = cal.axis;
+    return shapes.filter(function (s) {
+      if (!s || (s.name || '').indexOf('LTL|') === 0) return false;
+      if (/^today/i.test(s.name || '')) return true;
+      if (['GeometricShape', 'TextBox', 'Line', 'Group', 'Freeform', 'Callout'].indexOf(s.type) < 0) return false;
+      var cx = s.left + s.width / 2, cy = s.top + s.height / 2;
+      return cx >= ax.left && cx <= ax.right && cy >= cal.gridTop && cy <= cal.gridBottom;
+    }).map(function (s) { return s.id; });
+  }
+
+  var api = { fromTable: fromTable, legacyCandidates: legacyCandidates, periodColumns: periodColumns };
+  root.LT = root.LT || {};
+  root.LT.calib = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+  <script>
+/*
+ * Live Timeline — SVG renderer for the browser preview (draws the same shape specs PowerPoint gets).
+ */
+(function (root) {
+  'use strict';
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; });
+  }
+  var DASH = { dash: [4, 3], sysDash: [3, 1], sysDot: [1, 1], lgDash: [8, 3] };
+  function strokeAttrs(line) {
+    if (!line) return ' stroke="none"';
+    var a = ' stroke="' + line.color + '" stroke-width="' + line.w + '"';
+    var d = DASH[line.dash];
+    if (d) a += ' stroke-dasharray="' + d.map(function (v) { return +(v * line.w).toFixed(2); }).join(' ') + '"';
+    return a;
+  }
+  function f2(v) { return +(+v).toFixed(2); }
+
+  // PowerPoint's star5 preset: outer points touch the box; the centre sits at 55.3% of the height.
+  function star5(x, y, w, h) {
+    var cx = x + w / 2, cy = y + h * 0.55279, rx = w * 0.52573, ry = h * 0.55279, k = 0.38196, pts = [];
+    for (var i = 0; i < 10; i++) {
+      var a = -Math.PI / 2 + i * Math.PI / 5, r = (i % 2) ? k : 1;
+      pts.push(f2(cx + rx * r * Math.cos(a)) + ',' + f2(cy + ry * r * Math.sin(a)));
+    }
+    return pts.join(' ');
+  }
+
+  function shape(s) {
+    var fill = s.fill ? ' fill="' + s.fill + '"' : ' fill="none"';
+    var out = '';
+    switch (s.geom) {
+      case 'rect': out = '<rect x="' + f2(s.x) + '" y="' + f2(s.y) + '" width="' + f2(s.w) + '" height="' + f2(s.h) + '"' + fill + strokeAttrs(s.line) + '/>'; break;
+      case 'roundRect': var r = f2(Math.min(s.w, s.h) * 0.16667);
+        out = '<rect x="' + f2(s.x) + '" y="' + f2(s.y) + '" width="' + f2(s.w) + '" height="' + f2(s.h) + '" rx="' + r + '" ry="' + r + '"' + fill + strokeAttrs(s.line) + '/>'; break;
+      case 'ellipse': out = '<ellipse cx="' + f2(s.x + s.w / 2) + '" cy="' + f2(s.y + s.h / 2) + '" rx="' + f2(s.w / 2) + '" ry="' + f2(s.h / 2) + '"' + fill + strokeAttrs(s.line) + '/>'; break;
+      case 'star5': out = '<polygon points="' + star5(s.x, s.y, s.w, s.h) + '"' + fill + strokeAttrs(s.line) + ' stroke-linejoin="miter"/>'; break;
+      case 'line': out = '<line x1="' + f2(s.x) + '" y1="' + f2(s.y) + '" x2="' + f2(s.x + s.w) + '" y2="' + f2(s.y + s.h) + '"' + strokeAttrs(s.line) + '/>'; break;
+      default: if (s.fill) out = '<rect x="' + f2(s.x) + '" y="' + f2(s.y) + '" width="' + f2(s.w) + '" height="' + f2(s.h) + '"' + fill + '/>';
+    }
+    if (s.text && s.text.runs.length) {
+      var al = s.text.align, anchor = al === 'c' ? 'middle' : al === 'r' ? 'end' : 'start';
+      var tx = al === 'c' ? s.x + s.w / 2 : al === 'r' ? s.x + s.w : s.x;
+      var size = s.text.runs[0].size;
+      var ty = s.y + s.h / 2 + size * 0.355;
+      out += '<text x="' + f2(tx) + '" y="' + f2(ty) + '" text-anchor="' + anchor + '" font-family="Arial, Helvetica, \'Liberation Sans\', sans-serif" style="white-space:pre">' +
+        s.text.runs.map(function (r) {
+          return '<tspan font-size="' + r.size + '" fill="' + r.color + '"' + (r.bold ? ' font-weight="700"' : '') + '>' + esc(r.t) + '</tspan>';
+        }).join('') + '</text>';
+    }
+    return '<g data-key="' + esc(s.key) + '"><title>' + esc(s.name.replace(/^LTL\|/, '').replace(/\|/g, ' · ')) + '</title>' + out + '</g>';
+  }
+
+  /**
+   * @param {Array} specs
+   * @param {{width?:number, height?:number, backdrop?:string, backdropSvg?:string}} [opts]
+   */
+  function render(specs, opts) {
+    opts = opts || {};
+    var W = opts.width || 960, H = opts.height || 540;
+    var bg = opts.backdrop ? '<image href="' + opts.backdrop + '" x="0" y="0" width="' + W + '" height="' + H + '" preserveAspectRatio="none"/>' : (opts.backdropSvg || '<rect width="' + W + '" height="' + H + '" fill="#fff"/>');
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Timeline slide preview">' + bg + '<g class="ltl">' + specs.map(shape).join('') + '</g></svg>';
+  }
+
+  /** A plain timeline table (years, quarters, scenario rows) for previews that have no slide picture. */
+  function tableBackdrop(cal, names, title) {
+    var E = root.LT.engine, ax = cal.axis, out = [];
+    var W = 960, mw = (ax.right - ax.left) / (ax.endMonth - ax.startMonth);
+    var top = cal.gridTop - 64, yr = top + 28;
+    out.push('<rect width="960" height="540" fill="#fff"/>');
+    if (title) out.push('<text x="29" y="44" font-family="Arial" font-size="22" font-weight="700" fill="#3C3C3C">' + esc(title) + '</text>');
+    out.push('<rect x="29" y="' + top + '" width="' + (ax.left - 29) + '" height="64" fill="#3C3C3C"/>');
+    out.push('<text x="40" y="' + (top + 37) + '" font-family="Arial" font-size="12" font-weight="700" fill="#fff">Scenario</text>');
+    for (var m = ax.startMonth; m < ax.endMonth; m += 3) {
+      var x = ax.left + (m - ax.startMonth) * mw, w = 3 * mw;
+      if (E.monthOf(m) <= 3) {
+        out.push('<rect x="' + f2(x) + '" y="' + top + '" width="' + f2(Math.min(12 * mw, ax.right - x)) + '" height="28" fill="#3C3C3C" stroke="#fff" stroke-width="1"/>');
+        out.push('<text x="' + f2(x + Math.min(12 * mw, ax.right - x) / 2) + '" y="' + (top + 19) + '" text-anchor="middle" font-family="Arial" font-size="13" font-weight="700" fill="#fff">' + E.yearOf(m) + '</text>');
+      }
+      out.push('<rect x="' + f2(x) + '" y="' + yr + '" width="' + f2(w) + '" height="36" fill="#F2F2F2" stroke="#fff" stroke-width="1"/>');
+      out.push('<text x="' + f2(x + w / 2) + '" y="' + (yr + 22) + '" text-anchor="middle" font-family="Arial" font-size="10" font-weight="700" fill="#3C3C3C">' + E.quarterOf(m) + 'Q</text>');
+      if (E.yearOf(m) % 2 === 1) out.push('<rect x="' + f2(x) + '" y="' + cal.gridTop + '" width="' + f2(w) + '" height="' + (cal.gridBottom - cal.gridTop) + '" fill="#F5F5F5"/>');
+      out.push('<line x1="' + f2(x) + '" y1="' + cal.gridTop + '" x2="' + f2(x) + '" y2="' + cal.gridBottom + '" stroke="#D9D9D9" stroke-width="0.5" stroke-dasharray="2 2"/>');
+    }
+    cal.lanes.forEach(function (ln, i) {
+      out.push('<rect x="29" y="' + ln.top + '" width="' + (ax.left - 29) + '" height="' + (ln.bottom - ln.top) + '" fill="#F4F4F4"/>');
+      out.push('<line x1="29" y1="' + ln.bottom + '" x2="' + ax.right + '" y2="' + ln.bottom + '" stroke="#BFBFBF" stroke-width="0.75"/>');
+      out.push('<text x="40" y="' + ((ln.top + ln.bottom) / 2 + 4) + '" font-family="Arial" font-size="11" font-weight="700" fill="#3C3C3C">' + esc((names && names[i]) || ('Scenario ' + (i + 1))) + '</text>');
+    });
+    return out.join('');
+  }
+
+  var api = { render: render, shape: shape, tableBackdrop: tableBackdrop, star5: star5 };
+  root.LT = root.LT || {};
+  root.LT.svg = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+  <script>
+/* global PowerPoint, Office */
+/*
+ * Live Timeline — PowerPoint layer (Office.js).
+ * Reads the timeline table, stores the model in slide tags, and draws the layout engine's shape specs as native shapes.
+ * Every shape the add-in owns is named "LTL|..." so it can be found and redrawn; nothing else on the slide is touched.
+ *
+ * Requirement sets used: PowerPointApi 1.3 (tags), 1.4 (shapes, text), 1.5 (selection);
+ * optional 1.8 (grouping, reading tables) and 1.9 (table column widths / row heights).
+ */
+(function (root) {
+  'use strict';
+  var LT = root.LT;
+  var PREFIX = 'LTL|';
+  var GROUP_NAME = 'LTL|Live timeline';
+  var TAG_N = 'LTL_MODEL_N';
+  var TAG_P = 'LTL_MODEL_';
+  var CHUNK = 4000;
+
+  /** @param {string} v */
+  function supports(v) {
+    try { return Office.context.requirements.isSetSupported('PowerPointApi', v); } catch (e) { return false; }
+  }
+
+  /** @param {string} g */
+  function geomType(g) {
+    switch (g) {
+      case 'roundRect': return 'RoundRectangle';
+      case 'ellipse': return 'Ellipse';
+      case 'star5': return 'Star5';
+      default: return 'Rectangle';
+    }
+  }
+  /** @param {string} d */
+  function dashType(d) {
+    switch (d) {
+      case 'dash': return 'Dash';
+      case 'sysDash': return 'SystemDash';
+      case 'sysDot': return 'SystemDot';
+      case 'lgDash': return 'LongDash';
+      default: return 'Solid';
+    }
+  }
+  /** @param {string} a */
+  function alignType(a) { return a === 'c' ? 'Center' : a === 'r' ? 'Right' : 'Left'; }
+
+  /**
+   * @param {PowerPoint.RequestContext} ctx
+   * @param {string|null|undefined} slideId
+   * @returns {Promise<PowerPoint.Slide>}
+   */
+  async function getSlide(ctx, slideId) {
+    if (slideId) {
+      var byId = ctx.presentation.slides.getItemOrNullObject(slideId);
+      byId.load('id');
+      await ctx.sync();
+      if (!byId.isNullObject) return byId;
+    }
+    var sel = ctx.presentation.getSelectedSlides();
+    sel.load('items/id');
+    await ctx.sync();
+    if (sel.items.length) return sel.items[0];
+    var all = ctx.presentation.slides;
+    all.load('items/id');
+    await ctx.sync();
+    if (!all.items.length) throw new Error('This presentation has no slides.');
+    return all.items[0];
+  }
+
+  /** @param {PowerPoint.RequestContext} ctx @param {PowerPoint.Slide} slide */
+  async function readModel(ctx, slide) {
+    var tags = slide.tags;
+    tags.load('items/key,items/value');
+    await ctx.sync();
+    /** @type {Object<string, string>} */
+    var map = {};
+    tags.items.forEach(function (t) { map[t.key.toUpperCase()] = t.value; });
+    var n = parseInt(map[TAG_N] || '0', 10);
+    if (!n) return null;
+    var json = '';
+    for (var i = 0; i < n; i++) json += map[TAG_P + i] || '';
+    try { return JSON.parse(json); } catch (e) { return null; }
+  }
+
+  /** @param {PowerPoint.RequestContext} ctx @param {PowerPoint.Slide} slide @param {object} model */
+  async function writeModel(ctx, slide, model) {
+    var json = JSON.stringify(model);
+    /** @type {string[]} */
+    var parts = [];
+    for (var i = 0; i < json.length; i += CHUNK) parts.push(json.slice(i, i + CHUNK));
+    var tags = slide.tags;
+    tags.load('items/key');
+    await ctx.sync();
+    tags.items.forEach(function (t) {
+      var k = t.key.toUpperCase();
+      if (k.indexOf(TAG_P) === 0 && k !== TAG_N) {
+        var idx = parseInt(k.slice(TAG_P.length), 10);
+        if (!(idx < parts.length)) tags.delete(t.key);
+      }
+    });
+    parts.forEach(function (p, j) { tags.add(TAG_P + j, p); });
+    tags.add(TAG_N, String(parts.length));
+    await ctx.sync();
+  }
+
+  /** @param {PowerPoint.RequestContext} ctx @param {PowerPoint.Slide} slide */
+  async function shapeList(ctx, slide) {
+    var shapes = slide.shapes;
+    shapes.load('items/id,items/name,items/type,items/left,items/top,items/width,items/height');
+    await ctx.sync();
+    return shapes;
+  }
+
+  /**
+   * Finds the timeline table and measures its period columns and scenario rows.
+   * @param {PowerPoint.RequestContext} ctx @param {PowerPoint.Slide} slide
+   */
+  async function detect(ctx, slide) {
+    if (!supports('1.8')) return { cal: null, reason: 'Reading the table needs PowerPoint for Microsoft 365, Version 2504 or later.' };
+    var shapes = await shapeList(ctx, slide);
+    var tables = shapes.items.filter(function (s) { return s.type === 'Table'; });
+    if (!tables.length) return { cal: null, reason: 'There is no table on this slide.' };
+    var has19 = supports('1.9');
+    var jobs = tables.map(function (s) {
+      var t = s.getTable();
+      t.load('rowCount,columnCount,values');
+      if (has19) { t.columns.load('items/width'); t.rows.load('items/currentHeight'); }
+      return { s: s, t: t };
+    });
+    await ctx.sync();
+    if (!has19) return { cal: null, reason: 'Measuring the table needs PowerPoint for Microsoft 365, Version 2508 or later.' };
+    for (var i = 0; i < jobs.length; i++) {
+      var j = jobs[i];
+      var cal = LT.calib.fromTable({ left: j.s.left, top: j.s.top }, j.t.values,
+        j.t.columns.items.map(function (c) { return c.width; }),
+        j.t.rows.items.map(function (r) { return r.currentHeight; }));
+      if (cal) { cal.tableId = j.s.id; return { cal: cal, reason: '' }; }
+    }
+    return { cal: null, reason: 'No table with year and quarter headers was found on this slide.' };
+  }
+
+  /** @param {PowerPoint.RequestContext} ctx @param {PowerPoint.Slide} slide */
+  async function clearOwned(ctx, slide) {
+    var shapes = await shapeList(ctx, slide);
+    var n = 0;
+    shapes.items.forEach(function (s) { if ((s.name || '').indexOf(PREFIX) === 0) { s.delete(); n++; } });
+    await ctx.sync();
+    return n;
+  }
+
+  /**
+   * @param {PowerPoint.Shape} sh
+   * @param {{geom:string, text:{runs:Array<{t:string,size:number,color:string,bold:boolean}>, align:string}}} s
+   */
+  function applyText(sh, s) {
+    var tf = sh.textFrame;
+    // Theme defaults for new shapes can add autofit, padding, italics or a larger font; reset all of them.
+    tf.autoSizeSetting = 'AutoSizeNone';
+    tf.wordWrap = false;
+    tf.leftMargin = 0; tf.rightMargin = 0; tf.topMargin = 0; tf.bottomMargin = 0;
+    tf.verticalAlignment = 'Middle';
+    var runs = s.text.runs;
+    if (s.geom !== 'text') tf.textRange.text = runs.map(function (r) { return r.t; }).join('');
+    var tr = tf.textRange;
+    tr.paragraphFormat.horizontalAlignment = alignType(s.text.align);
+    tr.paragraphFormat.bulletFormat.visible = false;
+    var f = tr.font;
+    f.size = runs[0].size; f.bold = !!runs[0].bold; f.italic = false; f.color = runs[0].color;
+    var pos = runs[0].t.length;
+    for (var i = 1; i < runs.length; i++) {
+      var sub = tr.getSubstring(pos, runs[i].t.length).font;
+      sub.size = runs[i].size; sub.bold = !!runs[i].bold; sub.italic = false; sub.color = runs[i].color;
+      pos += runs[i].t.length;
+    }
+  }
+
+  /** @param {PowerPoint.ShapeCollection} shapes @param {any} s */
+  function addSpec(shapes, s) {
+    var opt = { left: s.x, top: s.y, width: s.w, height: s.h };
+    /** @type {PowerPoint.Shape} */
+    var sh;
+    if (s.geom === 'text') sh = shapes.addTextBox(s.text ? s.text.runs.map(function (/** @type {{t:string}} */ r) { return r.t; }).join('') : '', opt);
+    else if (s.geom === 'line') sh = shapes.addLine('Straight', opt);
+    else sh = shapes.addGeometricShape(geomType(s.geom), opt);
+    sh.name = s.name;
+    if (s.geom !== 'line') { if (s.fill) sh.fill.setSolidColor(s.fill); else sh.fill.clear(); }
+    if (s.line) {
+      sh.lineFormat.visible = true;
+      sh.lineFormat.color = s.line.color;
+      sh.lineFormat.weight = s.line.w;
+      sh.lineFormat.dashStyle = dashType(s.line.dash);
+    } else sh.lineFormat.visible = false;
+    if (s.text) applyText(sh, s);
+    // Re-assert the geometry last in case a theme's autofit resized the shape when text was added.
+    sh.left = s.x; sh.top = s.y; sh.width = s.w; sh.height = s.h;
+    return sh;
+  }
+
+  /**
+   * Redraws the live timeline on the slide and saves the model into the slide.
+   * @param {string|null} slideId @param {any} model @param {any} cal @param {any} [opts]
+   */
+  function redraw(slideId, model, cal, opts) {
+    return PowerPoint.run(async function (ctx) {
+      var slide = await getSlide(ctx, slideId);
+      var removed = await clearOwned(ctx, slide);
+      var built = LT.layout.build(model, cal, opts || {});
+      var shapes = slide.shapes;
+      var made = built.specs.map(function (/** @type {any} */ s) { return addSpec(shapes, s); });
+      await ctx.sync();
+      var grouped = false;
+      if (made.length > 1 && supports('1.8')) {
+        try {
+          var g = shapes.addGroup(made);
+          g.name = GROUP_NAME;
+          await ctx.sync();
+          grouped = true;
+        } catch (e) { /* grouping is cosmetic; shapes stay individually named */ }
+      }
+      model.calibration = cal;
+      await writeModel(ctx, slide, model);
+      return { count: made.length, removed: removed, grouped: grouped, warnings: built.warnings, slideId: slide.id };
+    });
+  }
+
+  /** Saves the model without redrawing (e.g. when live updates are off). @param {string|null} slideId @param {any} model */
+  function save(slideId, model) {
+    return PowerPoint.run(async function (ctx) {
+      var slide = await getSlide(ctx, slideId);
+      await writeModel(ctx, slide, model);
+    });
+  }
+
+  /** Reads the slide: saved model (if any), timeline table geometry, slide id and position. @param {string|null} [slideId] */
+  function load(slideId) {
+    return PowerPoint.run(async function (ctx) {
+      var slide = await getSlide(ctx, slideId);
+      var index = null;
+      if (supports('1.8')) { slide.load('index'); await ctx.sync(); index = slide.index; }
+      var model = await readModel(ctx, slide);
+      var det = await detect(ctx, slide);
+      return { slideId: slide.id, index: index, model: model, cal: det.cal, reason: det.reason };
+    });
+  }
+
+  function selectedSlideId() {
+    return PowerPoint.run(async function (ctx) {
+      var sel = ctx.presentation.getSelectedSlides();
+      sel.load('items/id');
+      await ctx.sync();
+      return sel.items.length ? sel.items[0].id : null;
+    });
+  }
+
+  /** Finds shapes that look like a hand-drawn timeline inside the table area, and selects them so they can be checked. @param {string|null} slideId @param {any} cal */
+  function findLegacy(slideId, cal) {
+    return PowerPoint.run(async function (ctx) {
+      var slide = await getSlide(ctx, slideId);
+      var shapes = await shapeList(ctx, slide);
+      var list = shapes.items.map(function (s) { return { id: s.id, name: s.name, type: String(s.type), left: s.left, top: s.top, width: s.width, height: s.height }; });
+      var ids = LT.calib.legacyCandidates(list, cal);
+      if (ids.length && supports('1.5')) { slide.setSelectedShapes(ids); await ctx.sync(); }
+      return list.filter(function (s) { return ids.indexOf(s.id) >= 0; });
+    });
+  }
+
+  /** @param {string|null} slideId @param {string[]} ids */
+  function deleteShapes(slideId, ids) {
+    return PowerPoint.run(async function (ctx) {
+      var slide = await getSlide(ctx, slideId);
+      ids.forEach(function (id) { slide.shapes.getItem(id).delete(); });
+      await ctx.sync();
+      return ids.length;
+    });
+  }
+
+  /** Removes the add-in's shapes and saved data from the slide. @param {string|null} slideId */
+  function removeAll(slideId) {
+    return PowerPoint.run(async function (ctx) {
+      var slide = await getSlide(ctx, slideId);
+      var n = await clearOwned(ctx, slide);
+      var tags = slide.tags;
+      tags.load('items/key');
+      await ctx.sync();
+      tags.items.forEach(function (t) { if (t.key.toUpperCase().indexOf('LTL_') === 0) tags.delete(t.key); });
+      await ctx.sync();
+      return n;
+    });
+  }
+
+  var api = {
+    supports: supports, load: load, redraw: redraw, save: save, selectedSlideId: selectedSlideId,
+    findLegacy: findLegacy, deleteShapes: deleteShapes, removeAll: removeAll
+  };
+  root.LT = root.LT || {};
+  root.LT.ppt = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+  <script>
+/*
+ * Live Timeline — built-in example (fictional), used when the pane is opened outside PowerPoint
+ * and for "Start with example scenarios" on a slide that has a timeline table.
+ */
+(function (root) {
+  'use strict';
+  var E = root.LT.engine;
+  var names = ['A. Immunobridging study', 'B. Efficacy study', 'C. File on existing data'];
+  root.LT.sample = {
+    title: 'Example: Vaccine X US filing scenarios',
+    names: names,
+    baselineLabel: 'Example baseline',
+    model: {
+      title: 'Example: Vaccine X US filing scenarios',
+      rules: { reviewPriority: 8, reviewStandard: 12, acipMonths: [2, 6, 10], acipMinGap: 1, readoutLag: 2, submissionLag: 1, pointLabels: 'quarter' },
+      scenarios: [
+        { id: 's1', name: names[0], row: 0, studyName: 'Ph3 IB', ssd: '2027-03', studyMonths: 9, priorityReview: false },
+        { id: 's2', name: names[1], row: 1, studyName: 'Ph3 efficacy', ssd: '2027-10', studyMonths: 14, priorityReview: false },
+        { id: 's3', name: names[2], row: 2, studyName: '', ssd: '', studyMonths: '', submission: '2027-02', priorityReview: true, note: 'Resubmission with updated analysis' }
+      ]
+    },
+    cal: {
+      axis: { startMonth: E.mi(2026, 1), endMonth: E.mi(2031, 1), left: 179, right: 697 },
+      lanes: [{ top: 146, bottom: 250 }, { top: 250, bottom: 354 }, { top: 354, bottom: 458 }],
+      gridTop: 146, gridBottom: 458, source: 'example'
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+  <script>
+/* global Office */
+/*
+ * Live Timeline — task pane UI.
+ * In PowerPoint it edits the model saved in the selected slide and redraws the slide;
+ * opened in a browser it runs the same pane against a preview of the slide.
+ */
+(function () {
+  'use strict';
+  var LT = window.LT, E = LT.engine, Lay = LT.layout;
+
+  var S = {
+    mode: 'preview', model: null, cal: null, calSource: '', calReason: '',
+    slideId: null, slideIndex: null, names: null,
+    history: [], live: true, dirty: false, busy: false, again: false, timer: 0, saveTimer: 0,
+    backdrop: null, backdropSvg: null, asOf: null, proposed: null, legacy: [], open: { scenarios: true }
+  };
+
+  // ---------- small helpers ----------
+  /** @param {string} id @returns {any} */
+  function $(id) { return document.getElementById(id); }
+  function h(tag, attrs, kids) {
+    var el = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v === null || v === undefined || v === false) return;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = v;
+      else if (k === 'value') el.value = v;
+      else if (k === 'checked') el.checked = !!v;
+      else if (k.slice(0, 2) === 'on') el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? '' : v);
+    });
+    (kids || []).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
+    return el;
+  }
+  function store(k, v) {
+    try { if (v === undefined) return window.localStorage.getItem(k); window.localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ }
+    return null;
+  }
+  function fmtTime(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  function short(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  function findSc(id, m) { var list = (m || S.model).scenarios; for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i]; return null; }
+  function scName(id) { if (id === 'rules') return 'Rules'; if (id === 'baseline') return 'Baseline'; var sc = findSc(id); return sc ? sc.name : id; }
+  function monthText(v) { var i = E.parseMonth(v); return i === null ? (v || '') : E.longMonth(i); }
+
+  function setStatus(msg, kind) { var el = $('status'); el.textContent = msg || ''; el.className = 'status' + (kind ? ' ' + kind : ''); }
+  function showError(e) { if (window.console) console.error(e); setStatus('Problem: ' + ((e && e.message) ? e.message : String(e)), 'error'); }
+
+  // ---------- start-up ----------
+  function boot() {
+    $('by').value = store('ltl.by') || '';
+    $('by').addEventListener('change', function () { store('ltl.by', $('by').value.trim()); });
+    $('btnUpdate').addEventListener('click', function () { if (S.mode === 'ppt') drawSlide(); else renderStage(); });
+    $('btnUndo').addEventListener('click', undo);
+    $('chkLive').addEventListener('change', function () { S.live = $('chkLive').checked; if (S.live && S.dirty) drawSlide(); markDirty(); });
+    $('stage').addEventListener('click', function (ev) {
+      var t = /** @type {any} */ (ev.target);
+      var g = t && t.closest ? t.closest('g[data-key]') : null;
+      if (!g) return;
+      var id = g.getAttribute('data-key').split('.')[0];
+      var card = $('card-' + id);
+      if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'start' }); card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash'); }
+    });
+    var started = false;
+    function begin(fn) {
+      started = true;
+      try { fn(); } catch (e) { showError(e); }
+    }
+    if (window.Office && typeof Office.onReady === 'function') {
+      setTimeout(function () {
+        if (!started) setStatus('Still waiting for PowerPoint to connect. Click inside this pane and press Ctrl+F5; if that does not help, close and reopen PowerPoint.', 'warn');
+      }, 8000);
+      Office.onReady(function (info) {
+        if (info && info.host === Office.HostType.PowerPoint) begin(startPowerPoint); else begin(startPreview);
+      });
+    } else begin(startPreview);
+  }
+
+  function startPreview() {
+    S.mode = 'preview';
+    document.body.classList.add('mode-preview');
+    var P = window.LT_PREVIEW || LT.sample;
+    S.model = E.normalizeModel(P.model);
+    S.cal = P.cal;
+    S.names = P.names || null;
+    S.backdrop = P.backdrop || null;
+    S.backdropSvg = P.backdrop ? null : LT.svg.tableBackdrop(P.cal, P.names, P.title);
+    S.asOf = P.asOf || null;
+    if (!S.model.baseline && P.baselineLabel) S.model.baseline = E.snapshot(S.model, P.baselineLabel);
+    S.initial = JSON.stringify(S.model);
+    renderAll();
+    if (window.__ltlLoadError) setStatus(window.__ltlLoadError, 'error');
+    else setStatus(P.statusText || 'Preview: the add-in’s engine and task pane, drawing on a picture of the slide.', 'ok');
+  }
+
+  function startPowerPoint() {
+    S.mode = 'ppt';
+    document.body.classList.add('mode-ppt');
+    try { Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, onSelectionChanged); } catch (e) { /* older hosts */ }
+    if (!LT.ppt.supports('1.4')) {
+      setStatus('This version of PowerPoint is too old for drawing shapes (needs Microsoft 365, Version 2207 or later).', 'error');
+      return;
+    }
+    loadSlide(null);
+  }
+
+  function loadSlide(id) {
+    setStatus('Reading the slide…', 'busy');
+    return LT.ppt.load(id).then(function (r) {
+      S.slideId = r.slideId;
+      S.slideIndex = r.index;
+      S.model = r.model ? E.normalizeModel(r.model) : null;
+      S.cal = r.cal || (r.model && r.model.calibration) || null;
+      S.calSource = r.cal ? 'table' : (S.cal ? 'saved' : 'none');
+      S.calReason = r.reason || '';
+      S.names = r.cal ? r.cal.names : null;
+      S.history = [];
+      S.legacy = [];
+      S.proposed = null;
+      renderAll();
+      var where = S.slideIndex !== null ? 'Slide ' + (S.slideIndex + 1) : 'This slide';
+      if (!S.model) setStatus(where + ' has no live timeline yet.', S.cal ? 'ok' : 'warn');
+      else if (!S.cal) setStatus(where + ': ' + (S.calReason || 'cannot find the timeline table.'), 'warn');
+      else setStatus(where + ' · ' + S.model.scenarios.length + ' scenarios · ' + (S.calSource === 'table' ? 'measured from the table' : 'using the saved layout'), 'ok');
+    }).catch(showError);
+  }
+
+  var selTimer = 0;
+  function onSelectionChanged() {
+    clearTimeout(selTimer);
+    selTimer = setTimeout(function () {
+      LT.ppt.selectedSlideId().then(function (id) {
+        if (id && id !== S.slideId && !S.busy) loadSlide(id);
+      }).catch(function () { /* ignore */ });
+    }, 400);
+  }
+
+  // ---------- changes, history, drawing ----------
+  function entry(scope, what, from, to) {
+    return { at: new Date().toISOString(), by: ($('by').value || '').trim(), id: scope, what: what, from: from, to: to, source: ($('src').value || '').trim() };
+  }
+
+  function change(mutate, entries, rerender) {
+    S.history.push(JSON.stringify(S.model));
+    if (S.history.length > 60) S.history.shift();
+    mutate(S.model);
+    (entries || []).forEach(function (e) {
+      // Several clicks on the same stepper within two minutes become one log entry (first "from", latest "to").
+      var log = S.model.changelog, last = log[log.length - 1];
+      if (last && last.id === e.id && last.what === e.what && last.by === e.by && last.source === e.source && Date.parse(e.at) - Date.parse(last.at) < 120000) {
+        last.to = e.to; last.at = e.at;
+        if (last.from === last.to) log.pop();
+      } else log.push(e);
+    });
+    if (S.model.changelog.length > 400) S.model.changelog = S.model.changelog.slice(-400);
+    if (rerender) renderAll(); else refreshComputed();
+    scheduleDraw();
+  }
+
+  function undo() {
+    if (!S.history.length) return;
+    S.model = JSON.parse(S.history.pop());
+    renderAll();
+    scheduleDraw(true);
+    setStatus('Undid the last change.', 'ok');
+  }
+
+  function scheduleDraw(force) {
+    if (S.mode === 'preview') { renderStage(); return; }
+    if (!S.live && !force) {
+      S.dirty = true; markDirty();
+      clearTimeout(S.saveTimer);
+      S.saveTimer = setTimeout(function () { LT.ppt.save(S.slideId, S.model).catch(showError); }, 600);
+      return;
+    }
+    clearTimeout(S.timer);
+    S.timer = setTimeout(drawSlide, 250);
+  }
+
+  function drawSlide() {
+    if (S.mode !== 'ppt' || !S.model) return;
+    if (!S.cal) { setStatus(S.calReason || 'Cannot find the timeline table on this slide.', 'warn'); return; }
+    if (S.busy) { S.again = true; return; }
+    S.busy = true;
+    setStatus('Updating the slide…', 'busy');
+    LT.ppt.redraw(S.slideId, S.model, S.cal, {}).then(function (r) {
+      S.dirty = false; markDirty();
+      setStatus('Slide updated · ' + r.count + ' shapes' + (r.warnings.length ? ' · see warnings' : ''), r.warnings.length ? 'warn' : 'ok');
+      renderGlobalWarnings(r.warnings);
+    }).catch(showError).then(function () {
+      S.busy = false;
+      if (S.again) { S.again = false; drawSlide(); }
+    });
+  }
+
+  function markDirty() {
+    var b = $('btnUpdate');
+    b.classList.toggle('attention', S.mode === 'ppt' && S.dirty);
+    b.textContent = (S.mode === 'ppt' && S.dirty) ? 'Update slide •' : 'Update slide';
+  }
+
+  function renderStage() {
+    var st = $('stage');
+    if (S.mode !== 'preview' || !S.model || !S.cal) { st.innerHTML = ''; return; }
+    var built = Lay.build(S.model, S.cal, { asOf: S.asOf || undefined });
+    st.innerHTML = '<div class="slide">' + LT.svg.render(built.specs, { backdrop: S.backdrop, backdropSvg: S.backdropSvg }) + '</div>';
+    renderGlobalWarnings(built.warnings);
+  }
+
+  function renderGlobalWarnings(list) {
+    var el = $('warnings');
+    if (!el) return;
+    el.innerHTML = '';
+    var outside = (list || []).filter(function (w) { return /outside the timeline|no matching row/.test(w); });
+    outside.forEach(function (w) { el.appendChild(h('div', { class: 'note warn', text: w })); });
+  }
+
+  // ---------- inputs ----------
+  function commitField(id, key, raw, opts) {
+    var sc = findSc(id), f = E.fieldByKey(key);
+    if (!sc || !f) return;
+    var v = E.coerce(f, raw);
+    if (f.type === 'month' && v && E.parseMonth(v) === null) { setStatus('Could not read "' + raw + '" as a month. Try Apr 2027 or 2027-04.', 'warn'); return false; }
+    if (E.sameValue(f, sc[key], v)) return true;
+    var e = entry(id, f.label, E.fieldValueText(f, sc[key]), E.fieldValueText(f, v));
+    var restructure = (key === 'ssd' || key === 'submission') && (!sc.ssd !== !(key === 'ssd' ? v : sc.ssd) || !sc.submission !== !(key === 'submission' ? v : sc.submission));
+    change(function (m) { findSc(id, m)[key] = v; }, [e], restructure || (opts && opts.rerender));
+    return true;
+  }
+
+  function textInput(id, key, val, ph) {
+    return h('input', { type: 'text', class: 'in', value: val || '', placeholder: ph || '', onchange: function (ev) { commitField(id, key, ev.target.value); } });
+  }
+
+  function monthInput(id, key, val, ph) {
+    var inp = h('input', { type: 'text', class: 'in month', value: monthText(val), placeholder: ph || 'e.g. Apr 2027', 'aria-label': E.fieldByKey(key).label });
+    inp.addEventListener('change', function () {
+      var ok = commitField(id, key, inp.value);
+      inp.classList.toggle('bad', ok === false);
+      if (ok !== false) inp.value = monthText(findSc(id)[key]);
+    });
+    function step(d) {
+      var sc = findSc(id), cur = E.parseMonth(sc[key]);
+      var now = new Date();
+      var base = cur === null ? E.mi(now.getFullYear(), now.getMonth() + 1) : cur + d;
+      commitField(id, key, E.toYM(base));
+      inp.value = monthText(findSc(id)[key]);
+      inp.classList.remove('bad');
+    }
+    return h('div', { class: 'stepper' }, [
+      h('button', { class: 'step', title: 'One month earlier', 'aria-label': 'One month earlier', onclick: function () { step(-1); }, text: '‹' }),
+      inp,
+      h('button', { class: 'step', title: 'One month later', 'aria-label': 'One month later', onclick: function () { step(1); }, text: '›' })
+    ]);
+  }
+
+  function numInput(id, key, val, ph, suffix) {
+    var inp = h('input', { type: 'text', inputmode: 'numeric', class: 'in num', value: (val === '' || val === null || val === undefined) ? '' : String(val), placeholder: ph || '', 'aria-label': E.fieldByKey(key).label });
+    inp.addEventListener('change', function () { commitField(id, key, inp.value); inp.value = String(findSc(id)[key]); });
+    function step(d) {
+      var sc = findSc(id), cur = Number(sc[key] === '' ? (ph || 0) : sc[key]) || 0;
+      commitField(id, key, String(Math.max(0, cur + d)));
+      inp.value = String(findSc(id)[key]);
+    }
+    return h('div', { class: 'stepper' }, [
+      h('button', { class: 'step', 'aria-label': 'Less', onclick: function () { step(-1); }, text: '‹' }),
+      inp,
+      h('button', { class: 'step', 'aria-label': 'More', onclick: function () { step(1); }, text: '›' }),
+      suffix ? h('span', { class: 'suffix', text: suffix }) : null
+    ]);
+  }
+
+  function checkbox(id, key, val, text) {
+    return h('label', { class: 'check' }, [
+      h('input', { type: 'checkbox', checked: !!val, onchange: function (ev) { commitField(id, key, ev.target.checked ? 'Y' : 'N'); } }),
+      ' ' + text
+    ]);
+  }
+
+  function row(label, control, hint) {
+    return h('div', { class: 'row' }, [h('label', { class: 'lbl', text: label }), h('div', { class: 'ctl' }, [control, hint ? h('div', { class: 'hint', text: hint }) : null])]);
+  }
+
+  function shiftScenario(id, d) {
+    var sc = findSc(id);
+    var key = sc.ssd ? 'ssd' : sc.submission ? 'submission' : sc.approval ? 'approval' : null;
+    if (!key) return;
+    var from = E.parseMonth(sc[key]);
+    change(function (m) {
+      var x = findSc(id, m);
+      ['ssd', 'submission', 'approval'].forEach(function (k) { var i = E.parseMonth(x[k]); if (i !== null) x[k] = E.toYM(i + d); });
+    }, [entry(id, 'Shifted whole scenario', E.longMonth(from), E.longMonth(from + d))], true);
+  }
+
+  // ---------- views ----------
+  function section(key, title, kids, extraHead) {
+    var d = h('details', { class: 'sec', id: 'sec-' + key, open: S.open[key] ? true : null }, [
+      h('summary', {}, [h('span', { text: title }), extraHead || null])
+    ].concat(kids));
+    d.addEventListener('toggle', function () { S.open[key] = d.open; });
+    return d;
+  }
+
+  function renderAll() {
+    var body = $('content');
+    body.innerHTML = '';
+    $('btnUndo').disabled = !S.history.length;
+    $('btnUpdate').disabled = !S.model;
+    markDirty();
+    if (!S.model) { body.appendChild(setupView()); renderStage(); return; }
+    body.appendChild(h('div', { id: 'warnings' }));
+    var list = h('div', { id: 'scenarios' });
+    S.model.scenarios.forEach(function (sc) { list.appendChild(scenarioCard(sc)); });
+    body.appendChild(list);
+    body.appendChild(teamView());
+    body.appendChild(baselineView());
+    body.appendChild(rulesView());
+    body.appendChild(logView());
+    body.appendChild(slideView());
+    refreshComputed();
+    renderStage();
+  }
+
+  function scenarioCard(sc) {
+    var id = sc.id;
+    var fixedSub = !!sc.submission && !sc.ssd;
+    var main = h('div', { class: 'grid' }, fixedSub ? [
+      row('Submission', monthInput(id, 'submission', sc.submission)),
+      row('Review', checkbox(id, 'priorityReview', sc.priorityReview, 'Priority review / PRV'))
+    ] : [
+      row('Study', textInput(id, 'studyName', sc.studyName, 'e.g. Ph3 rVE')),
+      row('Start (SSD)', monthInput(id, 'ssd', sc.ssd)),
+      row('Length', numInput(id, 'studyMonths', sc.studyMonths, '', 'months to PCD')),
+      row('Review', checkbox(id, 'priorityReview', sc.priorityReview, 'Priority review / PRV'))
+    ]);
+    var r = E.rulesOf(S.model);
+    var moreKids = [
+      h('div', { class: 'grid' }, [
+        fixedSub ? row('Study', textInput(id, 'studyName', sc.studyName, 'optional')) : null,
+        fixedSub ? row('Start (SSD)', monthInput(id, 'ssd', sc.ssd, 'none')) : null,
+        row('Topline', numInput(id, 'readoutLag', sc.readoutLag, String(r.readoutLag), 'months after PCD')),
+        row('Submission', numInput(id, 'submissionLag', sc.submissionLag, String(r.submissionLag), 'months after topline')),
+        fixedSub ? null : row('Fixed submission', monthInput(id, 'submission', sc.submission, 'none'), 'Overrides the study-based date'),
+        row('Review length', numInput(id, 'reviewMonths', sc.reviewMonths, String(sc.priorityReview ? r.reviewPriority : r.reviewStandard), 'months'), 'Blank uses the rule'),
+        row('Fixed approval', monthInput(id, 'approval', sc.approval, 'none')),
+        row('Note on slide', textInput(id, 'note', sc.note, 'e.g. Re-file with new data')),
+        row('ACIP label', h('label', { class: 'check' }, [
+          h('input', { type: 'checkbox', checked: !!sc.highlightAcip, onchange: function (ev) {
+            var v = ev.target.checked;
+            change(function (m) { findSc(id, m).highlightAcip = v; }, [entry(id, 'Highlight ACIP', v ? 'N' : 'Y', v ? 'Y' : 'N')]);
+          } }), ' Highlight in red'
+        ]))
+      ])
+    ];
+    var more = h('details', { class: 'more', open: S.open['more-' + id] ? true : null }, [h('summary', { text: 'More inputs' })].concat(moreKids));
+    more.addEventListener('toggle', function () { S.open['more-' + id] = more.open; });
+
+    return h('section', { class: 'card', id: 'card-' + id }, [
+      h('div', { class: 'card-head' }, [
+        h('div', { class: 'card-title', title: sc.name, text: sc.name || id }),
+        h('div', { class: 'shift' }, [
+          h('button', { class: 'chip', title: 'Move this scenario 3 months earlier', onclick: function () { shiftScenario(id, -3); }, text: '−3 mo' }),
+          h('button', { class: 'chip', title: 'Move this scenario 3 months later', onclick: function () { shiftScenario(id, 3); }, text: '+3 mo' })
+        ])
+      ]),
+      h('div', { class: 'chain', id: 'chain-' + id }),
+      h('div', { class: 'card-warn', id: 'warn-' + id }),
+      main,
+      more
+    ]);
+  }
+
+  function refreshComputed() {
+    if (!S.model) return;
+    var rules = E.rulesOf(S.model);
+    var dls = E.deltas(S.model);
+    S.model.scenarios.forEach(function (sc) {
+      var r = E.computeScenario(sc, rules);
+      var L = E.labels(r.events, rules);
+      var chain = $('chain-' + sc.id);
+      if (chain) {
+        chain.innerHTML = '';
+        var dl = dls[sc.id];
+        [['ssd', 'p-ssd'], ['pcd', 'p-pcd'], ['d', 'p-d', 'D '], ['s', 'p-s', 'S '], ['fda', 'p-fda'], ['acip', 'p-acip']].forEach(function (k, i, arr) {
+          if (!L[k[0]]) return;
+          var kids = [h('span', { text: (k[2] || '') + L[k[0]] })];
+          var dv = dl ? dl.delta[k[0]] : null;
+          if (k[0] === 'fda' && dv) kids.push(h('b', { class: dv > 0 ? 'late' : 'early', text: ' ' + (dv > 0 ? '+' : '−') + Math.abs(dv) + ' mo' }));
+          chain.appendChild(h('span', { class: 'pill ' + k[1] }, kids));
+        });
+      }
+      var w = $('warn-' + sc.id);
+      if (w) { w.innerHTML = ''; r.warnings.forEach(function (t) { w.appendChild(h('div', { class: 'note warn', text: t })); }); }
+    });
+    var bt = $('baseTable');
+    if (bt) fillBaselineTable(bt);
+    var lc = $('logCount');
+    if (lc) lc.textContent = S.model.changelog.length ? String(S.model.changelog.length) : '';
+    var ll = $('logList');
+    if (ll) fillLog(ll);
+    $('btnUndo').disabled = !S.history.length;
+  }
+
+  // ---- team updates ----
+  function teamView() {
+    var paste = h('textarea', { id: 'paste', class: 'in', rows: '4', placeholder: 'Paste the team’s edited table here (straight from Excel, Teams or email)' });
+    var copyOut = h('textarea', { id: 'copyOut', class: 'in mono hidden', rows: '4', readonly: true });
+    var proposals = h('div', { id: 'proposals' });
+    return section('team', 'Team updates', [
+      h('p', { class: 'help', text: 'Send the inputs as a table, let the team edit dates, lengths or PRV (Y/N), paste it back and apply only the changes you accept. Each change is logged with its source.' }),
+      h('div', { class: 'btns' }, [
+        h('button', { class: 'btn', onclick: copyTable, text: 'Copy input table' }),
+        h('button', { class: 'btn', onclick: copyTemplateNote, text: 'Copy note for the team' })
+      ]),
+      copyOut,
+      paste,
+      h('div', { class: 'btns' }, [h('button', { class: 'btn', onclick: function () { reviewPaste(paste.value); }, text: 'Review changes' })]),
+      proposals
+    ]);
+  }
+
+  function copyText(text, fallbackEl, what) {
+    function fallback() {
+      fallbackEl.classList.remove('hidden');
+      fallbackEl.value = text;
+      fallbackEl.focus(); fallbackEl.select();
+      setStatus('Select-all is done: press Ctrl+C (⌘C on Mac) to copy the ' + what + '.', 'warn');
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { fallbackEl.classList.add('hidden'); setStatus('Copied the ' + what + ' to the clipboard.', 'ok'); }, fallback);
+      } else fallback();
+    } catch (e) { fallback(); }
+  }
+  function copyTable() { copyText(E.toTSV(S.model), $('copyOut'), 'input table'); }
+  function copyTemplateNote() {
+    var text = 'Timeline check-in: please update any inputs that have changed in the table below (dates like "Apr 2027", lengths in months, PRV as Y/N), add your source, and send it back.\n\n' + E.toTSV(S.model);
+    copyText(text, $('copyOut'), 'note and table');
+  }
+
+  function reviewPaste(text) {
+    var res = E.parseUpdates(S.model, text);
+    S.proposed = res;
+    var box = $('proposals');
+    box.innerHTML = '';
+    res.problems.forEach(function (p) { box.appendChild(h('div', { class: 'note warn', text: p })); });
+    if (!res.changes.length) { box.appendChild(h('div', { class: 'note', text: res.problems.length ? 'No changes could be read.' : 'No differences from the current inputs.' })); return; }
+    var list = h('div', { class: 'proposals' });
+    res.changes.forEach(function (c, i) {
+      var f = E.fieldByKey(c.key);
+      list.appendChild(h('label', { class: 'proposal' }, [
+        h('input', { type: 'checkbox', checked: true, 'data-i': String(i) }),
+        h('span', {}, [h('b', { text: short(scName(c.id), 26) }), ' · ' + c.label + ': ', h('s', { text: E.fieldValueText(f, c.from) || 'blank' }), ' → ', h('b', { text: E.fieldValueText(f, c.to) || 'blank' })])
+      ]));
+    });
+    box.appendChild(list);
+    box.appendChild(h('div', { class: 'btns' }, [h('button', { class: 'btn primary', onclick: applyProposals, text: 'Apply checked changes' })]));
+  }
+
+  function applyProposals() {
+    if (!S.proposed) return;
+    var picked = Array.prototype.slice.call(document.querySelectorAll('#proposals input[type=checkbox]'))
+      .filter(function (c) { return c.checked; }).map(function (c) { return S.proposed.changes[Number(c.getAttribute('data-i'))]; });
+    if (!picked.length) return;
+    var src = ($('src').value || '').trim() || 'Team update (pasted table)';
+    var entries = picked.map(function (c) {
+      var f = E.fieldByKey(c.key), e = entry(c.id, c.label, E.fieldValueText(f, c.from), E.fieldValueText(f, c.to));
+      e.source = src;
+      return e;
+    });
+    change(function (m) { picked.forEach(function (c) { findSc(c.id, m)[c.key] = c.to; }); }, entries, true);
+    S.proposed = null;
+    setStatus('Applied ' + picked.length + ' change' + (picked.length > 1 ? 's' : '') + ' from the team table.', 'ok');
+  }
+
+  // ---- baseline ----
+  function baselineView() {
+    var b = S.model.baseline;
+    var label = h('input', { id: 'baseLabel', class: 'in', type: 'text', placeholder: 'e.g. Oct 2026 steering committee' });
+    return section('baseline', 'Baseline and slippage', [
+      h('p', { class: 'help', text: b ? 'Baseline “' + b.label + '”, saved ' + fmtTime(b.savedAt) + '.' : 'No baseline saved yet. Save one before a review to see what moved.' }),
+      h('label', { class: 'check' }, [
+        h('input', { type: 'checkbox', checked: !!S.model.showSlippage, disabled: b ? null : true, onchange: function (ev) {
+          var v = ev.target.checked;
+          change(function (m) { m.showSlippage = v; }, []);
+        } }), ' Show slippage on the slide (hollow star at the baseline approval, ± months next to FDA)'
+      ]),
+      h('div', { id: 'baseTable' }),
+      h('div', { class: 'row-inline' }, [label, h('button', { class: 'btn', onclick: function () {
+        var name = label.value.trim() || ('Baseline ' + new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }));
+        change(function (m) { m.baseline = E.snapshot(m, name); }, [entry('baseline', 'Saved baseline', '', name)], true);
+      }, text: 'Save current as baseline' })])
+    ]);
+  }
+
+  function fillBaselineTable(el) {
+    el.innerHTML = '';
+    var dls = E.deltas(S.model);
+    if (!S.model.baseline) return;
+    var rules = E.rulesOf(S.model);
+    var t = h('table', { class: 'tbl' }, [h('tr', {}, [h('th', { text: 'Scenario' }), h('th', { text: 'FDA, baseline' }), h('th', { text: 'Now' }), h('th', { text: 'Δ' })])]);
+    S.model.scenarios.forEach(function (sc) {
+      var r = E.computeScenario(sc, rules), dl = dls[sc.id];
+      var base = dl ? E.parseMonth(dl.base.fda) : null, now = r.events.fda;
+      var d = (base !== null && now !== null) ? now - base : null;
+      t.appendChild(h('tr', {}, [
+        h('td', { text: short(sc.name, 20), title: sc.name }),
+        h('td', { text: base !== null ? E.monthLabel(base) : '–' }),
+        h('td', { text: now !== null ? E.monthLabel(now) : '–' }),
+        h('td', { class: d > 0 ? 'late' : d < 0 ? 'early' : '', text: d === null ? '–' : d === 0 ? '0' : (d > 0 ? '+' : '−') + Math.abs(d) + ' mo' })
+      ]));
+    });
+    el.appendChild(t);
+  }
+
+  // ---- rules ----
+  function rulesView() {
+    var r = E.rulesOf(S.model);
+    function ruleNum(key, label, hint) {
+      var inp = h('input', { type: 'text', inputmode: 'numeric', class: 'in num', value: String(r[key]) });
+      inp.addEventListener('change', function () {
+        var v = Math.round(Number(inp.value));
+        if (!isFinite(v) || v < 0) { inp.value = String(E.rulesOf(S.model)[key]); return; }
+        var old = E.rulesOf(S.model)[key];
+        if (old === v) return;
+        change(function (m) { m.rules[key] = v; }, [entry('rules', label, String(old), String(v))], true);
+      });
+      return row(label, h('div', { class: 'stepper' }, [inp, h('span', { class: 'suffix', text: hint })]));
+    }
+    var chips = h('div', { class: 'chips' }, E.MONTHS.map(function (mn, i) {
+      var on = r.acipMonths.indexOf(i + 1) >= 0;
+      return h('button', { class: 'chip' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', text: mn.charAt(0) + mn.slice(1, 3), onclick: function () {
+        var cur = E.rulesOf(S.model).acipMonths.slice(), k = cur.indexOf(i + 1);
+        if (k >= 0) cur.splice(k, 1); else cur.push(i + 1);
+        cur.sort(function (a, b) { return a - b; });
+        var label = function (a) { return a.map(function (x) { return E.MONTHS[x - 1]; }).join(', '); };
+        change(function (m) { m.rules.acipMonths = cur; }, [entry('rules', 'ACIP meeting months', label(E.rulesOf(S.model).acipMonths), label(cur))], true);
+      } });
+    }));
+    var asOf = h('input', { type: 'date', class: 'in', value: S.model.asOf || '' });
+    asOf.addEventListener('change', function () { var v = asOf.value; change(function (m) { m.asOf = v; }, [entry('rules', 'Today line date', S.model.asOf || 'today', v || 'today')]); });
+    var pl = h('select', { class: 'in' }, [h('option', { value: 'quarter', text: 'Quarter (4Q ’27)' }), h('option', { value: 'month', text: 'Month (Nov ’27)' })]);
+    pl.value = r.pointLabels;
+    pl.addEventListener('change', function () { var v = pl.value; change(function (m) { m.rules.pointLabels = v; }, [entry('rules', 'D and S labels', r.pointLabels, v)]); });
+    return section('rules', 'Rules', [
+      h('p', { class: 'help', text: 'Applied to every scenario. A blank scenario input uses these defaults.' }),
+      h('div', { class: 'grid' }, [
+        ruleNum('reviewPriority', 'Priority review', 'months, submission → approval'),
+        ruleNum('reviewStandard', 'Standard review', 'months, submission → approval'),
+        ruleNum('readoutLag', 'Topline', 'months after PCD'),
+        ruleNum('submissionLag', 'Submission', 'months after topline'),
+        row('ACIP meets in', chips),
+        ruleNum('acipMinGap', 'ACIP vote', 'months after approval, at least'),
+        row('D and S labels', pl),
+        row('Today line', h('div', {}, [
+          h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: S.model.showToday !== false, onchange: function (ev) { var v = ev.target.checked; change(function (m) { m.showToday = v; }, []); } }), ' Show']),
+          asOf
+        ]), 'Date blank = today')
+      ])
+    ]);
+  }
+
+  // ---- change log ----
+  function logView() {
+    return section('log', 'Change log', [
+      h('div', { class: 'btns' }, [h('button', { class: 'btn', onclick: function () {
+        var rows = [['When', 'By', 'Scenario', 'What', 'From', 'To', 'Source'].join('\t')].concat(S.model.changelog.map(function (e) {
+          return [e.at, e.by, scName(e.id), e.what, e.from, e.to, e.source].map(function (x) { return String(x || '').replace(/[\t\n]/g, ' '); }).join('\t');
+        }));
+        copyText(rows.join('\n'), $('logOut'), 'change log');
+      }, text: 'Copy log' })]),
+      h('textarea', { id: 'logOut', class: 'in mono hidden', rows: '4', readonly: true }),
+      h('ol', { id: 'logList', class: 'log' })
+    ], h('span', { id: 'logCount', class: 'count' }));
+  }
+
+  function fillLog(el) {
+    el.innerHTML = '';
+    var items = S.model.changelog.slice(-80).reverse();
+    if (!items.length) { el.appendChild(h('li', { class: 'empty', text: 'No changes yet. Edits made here are recorded with who made them and the source.' })); return; }
+    items.forEach(function (e) {
+      el.appendChild(h('li', {}, [
+        h('div', { class: 'meta', text: fmtTime(e.at) + (e.by ? ' · ' + e.by : '') + ' · ' + short(scName(e.id), 30) }),
+        h('div', {}, [e.what + ': ', e.from ? h('s', { text: e.from }) : null, e.from ? ' → ' : '', h('b', { text: e.to || 'blank' })]),
+        e.source ? h('div', { class: 'src', text: e.source }) : null
+      ]));
+    });
+  }
+
+  // ---- slide setup ----
+  function calText() {
+    if (!S.cal) return S.calReason || 'No timeline table found.';
+    var ax = S.cal.axis;
+    return E.quarterLabel(ax.startMonth) + ' to ' + E.quarterLabel(ax.endMonth - 1) + ' · ' + S.cal.lanes.length + ' scenario rows · ' +
+      (S.calSource === 'table' ? 'measured from the table' : S.calSource === 'saved' ? 'saved layout (table could not be measured)' : 'example layout');
+  }
+
+  function slideView() {
+    if (S.mode === 'preview') {
+      return section('slide', 'About this preview', [
+        h('p', { class: 'help', text: 'This page runs the add-in’s engine and task pane against a picture of the slide. Inside PowerPoint the same pane draws native, editable shapes on the slide and saves its inputs in the slide itself.' }),
+        h('p', { class: 'help', text: 'Timeline: ' + calText() }),
+        h('div', { class: 'btns' }, [h('button', { class: 'btn', onclick: function () {
+          S.model = E.normalizeModel(JSON.parse(S.initial)); S.history = []; renderAll(); setStatus('Preview reset to the original inputs.', 'ok');
+        }, text: 'Reset preview' })])
+      ]);
+    }
+    var legacyBox = h('div', { id: 'legacy' });
+    return section('slide', 'Slide setup', [
+      h('p', { class: 'help', text: 'Timeline: ' + calText() }),
+      h('div', { class: 'btns' }, [
+        h('button', { class: 'btn', onclick: function () { loadSlide(S.slideId); }, text: 'Re-read slide' }),
+        h('button', { class: 'btn', onclick: findLegacy, disabled: S.cal ? null : true, text: 'Find hand-drawn shapes' }),
+        h('button', { class: 'btn danger', onclick: removeTimeline, text: 'Remove live timeline' })
+      ]),
+      legacyBox,
+      h('p', { class: 'help small', text: 'The add-in only touches shapes whose names start with “LTL|” (see Home › Arrange › Selection Pane). Inputs, baseline and change log are saved inside this slide.' })
+    ]);
+  }
+
+  function findLegacy() {
+    LT.ppt.findLegacy(S.slideId, S.cal).then(function (list) {
+      S.legacy = list;
+      var box = $('legacy');
+      box.innerHTML = '';
+      if (!list.length) { box.appendChild(h('div', { class: 'note', text: 'No hand-drawn timeline shapes found inside the table area.' })); return; }
+      box.appendChild(h('div', { class: 'note warn', text: list.length + ' shapes are now selected on the slide (bars, markers and labels drawn by hand). Check the selection, then delete them so only the live timeline remains.' }));
+      box.appendChild(h('div', { class: 'btns' }, [h('button', { class: 'btn danger', onclick: function () {
+        LT.ppt.deleteShapes(S.slideId, S.legacy.map(function (s) { return s.id; })).then(function (n) {
+          S.legacy = []; box.innerHTML = '';
+          setStatus('Deleted ' + n + ' hand-drawn shapes.', 'ok');
+          if (S.model) drawSlide();
+        }).catch(showError);
+      }, text: 'Delete these ' + list.length + ' shapes' })]));
+    }).catch(showError);
+  }
+
+  function removeTimeline() {
+    LT.ppt.removeAll(S.slideId).then(function (n) {
+      setStatus('Removed the live timeline (' + n + ' shape groups) and its saved inputs from this slide.', 'ok');
+      return loadSlide(S.slideId);
+    }).catch(showError);
+  }
+
+  function setupView() {
+    var kids = [];
+    if (S.mode === 'ppt') {
+      if (S.cal) {
+        kids.push(h('p', { class: 'help', text: 'This slide has a timeline table (' + calText() + ').' }));
+        kids.push(h('ul', { class: 'rows' }, (S.names || []).map(function (n, i) { return h('li', { text: n || ('Row ' + (i + 1)) }); })));
+        kids.push(h('p', { class: 'help', text: 'If the timeline was drawn by hand, remove those shapes first so they are not left under the live version.' }));
+        kids.push(h('div', { class: 'btns' }, [h('button', { class: 'btn', onclick: findLegacy, text: 'Find hand-drawn shapes' })]));
+        kids.push(h('div', { id: 'legacy' }));
+        kids.push(h('div', { class: 'btns' }, [
+          h('button', { class: 'btn primary', onclick: function () { startModel(false); }, text: 'Start a live timeline for these rows' }),
+          h('button', { class: 'btn', onclick: function () { startModel(true); }, text: 'Use example inputs' })
+        ]));
+      } else {
+        kids.push(h('p', { class: 'help', text: S.calReason || 'No timeline table found on this slide.' }));
+        kids.push(h('p', { class: 'help', text: 'Select a slide with a table whose header has years and quarters (like the filing-scenarios slide), then press Re-read slide.' }));
+        kids.push(h('div', { class: 'btns' }, [h('button', { class: 'btn', onclick: function () { loadSlide(null); }, text: 'Re-read slide' })]));
+      }
+    }
+    return h('section', { class: 'card setup' }, [h('div', { class: 'card-title', text: 'Set up this slide' })].concat(kids));
+  }
+
+  function startModel(example) {
+    var names = S.names && S.names.length ? S.names : S.cal.lanes.map(function (_, i) { return 'Scenario ' + (i + 1); });
+    var scen = names.map(function (n, i) {
+      var b = E.blankScenario(i);
+      b.name = n || b.name;
+      if (example && LT.sample.model.scenarios[i]) { var ex = LT.sample.model.scenarios[i]; Object.keys(ex).forEach(function (k) { if (k !== 'name' && k !== 'id' && k !== 'row') b[k] = ex[k]; }); }
+      else { b.studyName = ''; b.studyMonths = ''; }
+      return b;
+    });
+    S.model = E.normalizeModel({ scenarios: scen, rules: LT.sample.model.rules });
+    S.model.changelog.push(entry('rules', 'Started live timeline', '', example ? 'example inputs' : 'blank inputs'));
+    S.history = [];
+    S.open.scenarios = true;
+    renderAll();
+    drawSlide();
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+})();
+
+</script>
 </head>
 <body>
   <div id="app">
@@ -24,7 +2044,7 @@
           <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><rect x="1" y="5" width="9" height="5" rx="1" fill="#69B445"/><circle cx="12.5" cy="7.5" r="2.6" fill="#244EA2"/><path d="M15.6 2.2l.6 1.8h1.8l-1.5 1.1.6 1.8-1.5-1.1-1.5 1.1.6-1.8-1.5-1.1h1.8z" fill="#FFC709"/><line x1="1" y1="13.5" x2="17" y2="13.5" stroke="#9aa0a6" stroke-width="1"/></svg>
           <span>Live Timeline</span>
         </div>
-        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <div id="status" class="status" role="status" aria-live="polite">Loading&hellip;</div>
       </header>
       <div class="toolbar">
         <button id="btnUpdate" class="btn primary">Update slide</button>
@@ -36,6 +2056,7 @@
         <label class="by">By<input id="by" class="in" type="text" maxlength="6" placeholder="CD"></label>
       </div>
       <div id="content"></div>
+      <div class="ver">Live Timeline v1.0.1</div>
     </aside>
   </div>
 </body>
